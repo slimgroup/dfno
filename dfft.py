@@ -148,6 +148,11 @@ if __name__ == '__main__':
     P_x_base = P_world.create_partition_inclusive(np.arange(nw))
     P_x = P_x_base.create_cartesian_topology_partition(args.partition_shape)
 
+    if args.verbose and P_0.active:
+        print(f'==== Partitions ====')
+        print(f'P_world.size = {P_world.size}')
+        print(f'P_x.shape = {P_x.shape}')
+
     # Setup distribution layers
     scatter = distdl.nn.DistributedTranspose(P_0, P_x)
     gather = distdl.nn.DistributedTranspose(P_x, P_0)
@@ -182,8 +187,15 @@ if __name__ == '__main__':
     if P_0.active:
         F0 = torch.fft.fftn(Y0)
 
-    Y1 = scatter(Y1)
     dfftn = DXFFTN(P_x, decomposition_order=args.decomposition_order)
+
+    if args.verbose and P_0.active:
+        print(f'==== FFT Partitions ====')
+        print('dims -> partition shape')
+        for ds, P in zip(dfftn.partition_dims, dfftn.partitions):
+            print(f'{ds} -> {P.shape}')
+
+    Y1 = scatter(Y1)
     F1 = dfftn(Y1)
     F1 = gather(F1)
 
