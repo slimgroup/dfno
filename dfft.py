@@ -5,7 +5,7 @@ import torch
 
 from distdl.utilities.torch import *
 from torch import Tensor
-from typing import Any, Callable, List, NewType, Optional
+from typing import Any, Callable, Dict, List, NewType, Optional
 from utils import *
 
 Partition = distdl.backend.backend.Partition
@@ -73,6 +73,10 @@ class DXFFTN(nn.Module):
         performing an n-dimensional fast fourier transform on every given
         dimension if none are provided.
 
+    transform_kwargs : Optional[List[Dict]]
+        List of keyword arguments to apply on a per-transform basis. Defaults to
+        a list of dictionaries with kwargs to fftn if none are specified.
+
     decomposition_order : Optional[int]
         The number of dimensions with partition size 1 in each fft partition.
         E.g. in 3d, a pencil decomposition has decomposition_order = 1, while
@@ -85,6 +89,7 @@ class DXFFTN(nn.Module):
                  dims: Optional[List[int]] = None,
                  partition_dims_mapping: Optional[PartitionDimsMapping] = None,
                  transforms: Optional[List[Transform]] = None,
+                 transform_kwargs: Optional[List[Dict]] = None,
                  decomposition_order: Optional[int] = 1) -> None:
 
         super(DXFFTN, self).__init__()
@@ -94,7 +99,7 @@ class DXFFTN(nn.Module):
 
         self.dims = np.arange(self.n) if dims is None else dims
         self.d = len(self.dims)
-
+        
         self.decomposition_order = decomposition_order
         
         # Partition dimensions are of size decomposition_order, except in the
@@ -114,11 +119,14 @@ class DXFFTN(nn.Module):
         self.transforms = [torch.fft.fftn for _ in range(len(self.partitions))] if transforms is None \
                 else transforms
 
+        self.transform_kwargs = [{'dim': tuple(ds)} for ds in self.partition_dims] if transform_kwargs is None else transform_kwargs
+
         # We compute the transforms in the reverse order to which they are passed
         # to mimic the behavior of fftw and torch
         self.partition_dims = list(reversed(self.partition_dims))
         self.partitions = list(reversed(self.partitions))
         self.transforms = list(reversed(self.transforms))
+        self.transform_kwargs = list(reversed(self.transform_kwargs))
 
         # Set up transpose operators
         self.P_y = self.partitions[-1] if P_y is None else P_y
@@ -130,8 +138,8 @@ class DXFFTN(nn.Module):
 
         x = self.transpose_in(x)
 
-        for f, T, ds in zip(self.transforms, self.transposes, self.partition_dims):
-            x = f(x, dim=tuple(ds))
+        for f, kwargs, T, ds in zip(self.transforms, self.transform_kwargs, self.transposes, self.partition_dims):
+            x = f(x, **kwargs)
             x = T(x)
 
         return x
@@ -207,12 +215,12 @@ if __name__ == '__main__':
     if P_0.active:
         F0 = torch.fft.rfftn(Y0)
 
-    dfftn = DXFFTN(P_x, P_y=P_x, transforms=[torch.fft.fftn, torch.fft.rfftn], decomposition_order=args.decomposition_order)
+    drfftn = DXFFTN(P_x, P_y=P_x, transforms=[torch.fft.fftn, torch.fft.rfftn], decomposition_order=args.decomposition_order)
 
     if args.verbose and P_0.active:
         print(f'==== FFT Partitions ====')
         print('dims -> fft partition shape')
-        for ds, P in zip(dfftn.partition_dims, dfftn.partitions):
+        for ds, P in zip(drfftn.partition_dims, drfftn.partitions):
             print(f'{ds} -> {P.shape}')
 
     Y1 = scatter(Y1)
