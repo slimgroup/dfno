@@ -10,47 +10,33 @@ from utils import *
 
 Partition = distdl.backend.backend.Partition
 Transform = NewType('Transform', Callable[[Tensor], Tensor])
+PartitionDimsMapping = NewType('PartitionDimsMapping', Callable[[List[int]], Partition])
 
-def create_dxfftn_decomposition_partition(P_x: Partition, dims: List[int], mul_dims: Optional[List[int]] = None) -> Partition:
-    '''Creates a partition over which sequential transforms will be performed
-    on every dimension of size 1.
-
-    Arguments
-    ---------
-
-    P_x : Partition
-        The base partition
+def default_partition_dims_mapping(P_x: Partition, dims_all: List[List[int]], dims: List[int]) -> Partition:
     
-    dims : List[int]
-        The dimensions which will have size 0
-
-    mul_dims : Optional[List[int]]
-        List of dimensions to multiply dims into to keep the number of workers
-        the same when repartitioning. Defaults to the next set of dimensions of
-        the same size above dims, modulo the shape of the partition without
-        overlap if none provided.
-
-    Returns
-    -------
-
-    P_decomposition : Partition
-        A cartesian partition with the same number of workers as P_x, and size
-        1 on the given dims.
-
-    '''
-
-    n = P_x.dim
-    k = len(dims)
+    l = len(dims_all)
     
-    if mul_dims is None:
-        mul_dims = [(d + k) % n for d in dims]
-        mul_dims = [n-1 if m in dims else m for m in mul_dims]
+    # Get the index of the passed dimension list in the list of all
+    # dimension lists
+    index = 0
+    for i, ds in enumerate(dims_all):
+        if np.array_equal(ds, dims):
+            index = i
+    
+    # By default, take the dims we will multiply into to be the next
+    # list of dims in the list of lists
+    next_index = (index + 1) % l
+    next_dims = dims_all[next_index]
+    k = len(next_dims)
 
+    mul_dims = [next_dims[d%k] for d in dims]
+    
+    # Assemble partition shape by setting the indices of the passed dims
+    # to 1 and the computed mul dims to the product of dims and mul dims
     P_shape = np.copy(P_x.shape)
-
     for d, m in zip(dims, mul_dims):
         P_shape[d] = 1
-        P_shape[m] = P_shape[m]*P_x.shape[d]
+        P_shape[m] *= P_x.shape[d]
 
     return P_x.create_cartesian_topology_partition(P_shape)
 
@@ -65,9 +51,20 @@ class DXFFTN(nn.Module):
     P_x : Partition
         The partition over which the input tensor is distributed
 
+    P_y : Optional[Partition]
+        The partition over which the output tensor should be distributed.
+        Defaults to the partition of the last performed transformation if
+        none is provided.
+
     dims : Optional[List[int]]
         A list of dimensions over which to perform the transforms. Defaults to
-        all dimensions if none are provided.
+        all dimensions if none are provided. The transforms are applied to the
+        last dimension first, to the first dimension.
+
+    partition_dims_mapping : Optional[PartitionDimsMapping]
+        Mapping from each list of transform partition dims to the shape of the
+        corresponding transform partition. Defaults to a modulo operator over
+        dims if none is provided.
 
     transforms : Optional[List[Transform]]
         A list of transforms to apply on a per-dimension basis. These need not
@@ -81,33 +78,56 @@ class DXFFTN(nn.Module):
         E.g. in 3d, a pencil decomposition has decomposition_order = 1, while
         a slab decomposition has decomposition_order = 2, etc.
     '''
-    
 
     def __init__(self,
                  P_x: Partition,
+                 P_y: Optional[Partition] = None,
                  dims: Optional[List[int]] = None,
+                 partition_dims_mapping: Optional[PartitionDimsMapping] = None,
                  transforms: Optional[List[Transform]] = None,
                  decomposition_order: Optional[int] = 1) -> None:
 
         super(DXFFTN, self).__init__()
 
         self.P_x = P_x
-        self.dims = np.arange(P_x.dim) if dims is None else dims
-        self.transforms = [torch.fft.fftn for _ in range(len(self.dims))] if transforms is None else transforms
+        self.n = P_x.dim
+
+        self.dims = np.arange(self.n) if dims is None else dims
+        self.d = len(self.dims)
+
         self.decomposition_order = decomposition_order
         
+        # Partition dimensions are of size decomposition_order, except in the
+        # last dimension if decomposition_order does not divide P_x.dim
         self.partition_dims = []
-        for i in range(0, len(self.dims), self.decomposition_order):
-            j = min(len(self.dims), i + self.decomposition_order)
+        for i in range(0, self.d, self.decomposition_order):
+            j = min(i + self.decomposition_order, self.d)
             self.partition_dims.append(self.dims[i:j])
+        
+        # Use the default dims mapping if none is provided
+        self.partition_dims_mapping = lambda ds: default_partition_dims_mapping(self.P_x, self.partition_dims, ds) \
+                if partition_dims_mapping is None else partition_dims_mapping
 
-        self.partitions = [create_dxfftn_decomposition_partition(self.P_x, ds) for ds in self.partition_dims]
+        self.partitions = [self.partition_dims_mapping(ds) for ds in self.partition_dims]
+        
+        # Default to fftn if no transforms are provided
+        self.transforms = [torch.fft.fftn for _ in range(len(self.partitions))] if transforms is None \
+                else transforms
+
+        # We compute the transforms in the reverse order to which they are passed
+        # to mimic the behavior of fftw and torch
+        self.partition_dims = list(reversed(self.partition_dims))
+        self.partitions = list(reversed(self.partitions))
+        self.transforms = list(reversed(self.transforms))
+
+        # Set up transpose operators
+        self.P_y = self.partitions[-1] if P_y is None else P_y
         self.transposes = [distdl.nn.DistributedTranspose(P_i, P_j) for [P_i, P_j] in window_iter(self.partitions, 2)]
-        self.transposes.append(distdl.nn.DistributedTranspose(self.partitions[-1], self.P_x))
+        self.transposes.append(distdl.nn.DistributedTranspose(self.partitions[-1], self.P_y))
         self.transpose_in = distdl.nn.DistributedTranspose(self.P_x, self.partitions[0])
 
     def forward(self, x: Tensor) -> Tensor:
-        
+
         x = self.transpose_in(x)
 
         for f, T, ds in zip(self.transforms, self.transposes, self.partition_dims):
@@ -127,7 +147,7 @@ if __name__ == '__main__':
         
     # Parse program arguments
     parser = ArgumentParser()
-
+    
     parser.add_argument('--partition-shape', '-ps', type=int, nargs='+')
     parser.add_argument('--sampling-rate', '-sr', type=int, default=32)
     parser.add_argument('--decomposition-order', '-do', type=int, default=1)
@@ -185,13 +205,13 @@ if __name__ == '__main__':
 
     # Perform sequential and distributed FFTs
     if P_0.active:
-        F0 = torch.fft.fftn(Y0)
+        F0 = torch.fft.rfftn(Y0)
 
-    dfftn = DXFFTN(P_x, decomposition_order=args.decomposition_order)
+    dfftn = DXFFTN(P_x, P_y=P_x, transforms=[torch.fft.fftn, torch.fft.rfftn], decomposition_order=args.decomposition_order)
 
     if args.verbose and P_0.active:
         print(f'==== FFT Partitions ====')
-        print('dims -> partition shape')
+        print('dims -> fft partition shape')
         for ds, P in zip(dfftn.partition_dims, dfftn.partitions):
             print(f'{ds} -> {P.shape}')
 
@@ -206,12 +226,18 @@ if __name__ == '__main__':
         print(f'norm(F1-F0) = {err}')
 
         if args.display and n == 2:
+            
+            print(F0.shape)
+            print(F1.shape)
+
+            Xs_fft = np.meshgrid(*[np.linspace(0, 1, a) for a in reversed(F0.shape)])
+
             ax = fig.add_subplot(132, projection='3d')
-            ax.plot_surface(*Xs, F0.numpy().imag, cmap=cm.jet)
+            ax.plot_surface(*Xs_fft, F0.numpy().imag, cmap=cm.jet)
             ax.set_title('FFTN (Torch)')
 
             ax = fig.add_subplot(133, projection='3d')
-            ax.plot_surface(*Xs, F1.numpy().imag, cmap=cm.jet)
+            ax.plot_surface(*Xs_fft, F1.numpy().imag, cmap=cm.jet)
             ax.set_title('DFFTN (Custom)')
             
             plt.show()
