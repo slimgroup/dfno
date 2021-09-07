@@ -1,6 +1,7 @@
 import distdl
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 
 from dfft import DXFFTN
@@ -51,12 +52,16 @@ class DistributedSpectralConv3d(nn.Module):
         self.weights4 = None
 
     def create_weight(self, in_channels: int, out_channels: int, modes1: int, modes2: int, modes3: int) -> Tensor:
+        '''Creates a fourier mode weight for cases with positive mode sizes'''
+
         if all(x > 0 for x in [modes1, modes2, modes3]):
             return nn.Parameter(torch.randn(in_channels, out_channels, modes1, modes2, modes3, dtype=torch.cfloat))
         else:
             return zero_volume_tensor()
         
     def compl_mul3d(self, x: Tensor, weights: Tensor) -> Tensor:
+        '''Complex matrix multiplication in the channel dimension'''
+
         return torch.einsum('bixyz,ioxyz->boxyz', x, weights)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -151,7 +156,81 @@ class DistributedSpectralConv3d(nn.Module):
                     self.compl_mul3d(x_ft[:, :, self.modes1_start_high:, self.modes2_start_high:, :self.modes3_stop_low], self.weights4)
         
         # Return to physical space
-        x = self.dirfftn(x_ft)
+        x = self.dirfftn(x_ft).real
+
+        return x
+
+class DistributedFNO3d(nn.Module):
+
+    def __init__(self, P_x: Partition, modes1: int, modes2: int, modes3: int, width: int) -> None:
+        super(DistributedFNO3d, self).__init__()
+        
+        self.P_x = P_x
+        
+        # For now only support spatial distribution
+        assert P_x.shape[0] == 1, 'Batch distribution is currently unsupported'
+        assert P_x.shape[1] == 1, 'Channel distribution is currently unsupported'
+
+        self.modes1 = modes1
+        self.modes2 = modes2
+        self.modes3 = modes3
+        self.width = width
+        self.padding = 6 # pad the domain if input is non-periodic
+        self.fc0 = nn.Linear(13, self.width)
+        # input channel is 12: the solution of the first 10 timesteps + 3 locations (u(1, x, y), ..., u(10, x, y),  x, y, t)
+        
+        # Set up layers
+        self.conv0 = DistributedSpectralConv3d(self.P_x, self.width, self.width, self.modes1, self.modes2, self.modes3)
+        self.conv1 = DistributedSpectralConv3d(self.P_x, self.width, self.width, self.modes1, self.modes2, self.modes3)
+        self.conv2 = DistributedSpectralConv3d(self.P_x, self.width, self.width, self.modes1, self.modes2, self.modes3)
+        self.conv3 = DistributedSpectralConv3d(self.P_x, self.width, self.width, self.modes1, self.modes2, self.modes3)
+
+        self.w0 = distdl.nn.DistributedFeatureConv3d(self.P_x, self.width, self.width, 1)
+        self.w1 = distdl.nn.DistributedFeatureConv3d(self.P_x, self.width, self.width, 1)
+        self.w2 = distdl.nn.DistributedFeatureConv3d(self.P_x, self.width, self.width, 1)
+        self.w3 = distdl.nn.DistributedFeatureConv3d(self.P_x, self.width, self.width, 1)
+
+        self.bn0 = distdl.nn.DistributedBatchNorm(self.P_x, self.width)
+        self.bn1 = distdl.nn.DistributedBatchNorm(self.P_x, self.width)
+        self.bn2 = distdl.nn.DistributedBatchNorm(self.P_x, self.width)
+        self.bn3 = distdl.nn.DistributedBatchNorm(self.P_x, self.width)
+        
+        self.fc1 = nn.Parameter(torch.randn(self.width, 128))
+        self.fc2 = nn.Parameter(torch.randn(128, 1))
+
+    def forward(self, x: Tensor) -> Tensor:
+
+        # TODO: There is some strange padding operator here in the sequential
+        # code. Need to implement that in a distributed fashion somehow. Also a
+        # permutation of the input tensor, assuming due to the way data is stored?
+        # A custom data loader is definitely needed.
+
+        x1 = self.conv0(x)
+        x2 = self.w0(x)
+        x = x1 + x2
+        x = F.gelu(x)
+
+        x1 = self.conv1(x)
+        x2 = self.w1(x)
+        x = x1 + x2
+        x = F.gelu(x)
+
+        x1 = self.conv2(x)
+        x2 = self.w2(x)
+        x = x1 + x2
+        x = F.gelu(x)
+
+        x1 = self.conv3(x)
+        x2 = self.w3(x)
+        x = x1 + x2
+        x = F.gelu(x)
+
+        # Do the linear layers using einsum() to minimize data movement. These
+        # are independent of spatial dimensions, and batch and channel are
+        # assumed to not be distributed.
+        x = torch.einsum('bixyz,io->boxyz', x, self.fc1)
+        x = F.gelu(x)
+        x = torch.einsum('bixyz,io->boxyz', x, self.fc2)
 
         return x
 
