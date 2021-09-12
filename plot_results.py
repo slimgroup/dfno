@@ -16,51 +16,51 @@ tree = lambda: defaultdict(tree)
 
 def parse_data(fpath):
 
-	data = tree()
-	
-	with open(fpath, 'r') as f:
+    data = tree()
+    
+    with open(fpath, 'r') as f:
 
-		input_shape_string = f.readline()[1:-2].strip()
-		input_partition_shape_string = f.readline()[1:-2].strip()
+        input_shape_string = f.readline()[1:-2].strip()
+        input_partition_shape_string = f.readline()[1:-2].strip()
 
-		data['input_shape'] = np.array([int(x) for x in input_shape_string.split()], dtype=int)
-		data['input_partition_shape'] = np.array([int(x) for x in input_partition_shape_string.split(' ')], dtype=int)
-		data['num_workers'] = np.prod(data['input_partition_shape'])
+        data['input_shape'] = np.array([int(x) for x in input_shape_string.split()], dtype=int)
+        data['input_partition_shape'] = np.array([int(x) for x in input_partition_shape_string.split(' ')], dtype=int)
+        data['num_workers'] = np.prod(data['input_partition_shape'])
 
-		for l in f.readlines():
+        for l in f.readlines():
 
-			section, start, stop, diff, batch = l.strip().split(',')
-			diff = float(diff)
-			batch = int(batch)
-			
-			if section not in data[batch]:
-				data[batch][section] = []
+            section, start, stop, diff, batch = l.strip().split(',')
+            diff = float(diff)
+            batch = int(batch)
+            
+            if section not in data[batch]:
+                data[batch][section] = []
 
-			data[batch][section].append(diff)
+            data[batch][section].append(diff)
 
-	return data
+    return data
 
 def get_timings(data):
 
-	timings = defaultdict(list)
+    timings = defaultdict(list)
 
-	for batch, v in data.items():
+    for batch, v in data.items():
 
-		if not isinstance(v, defaultdict):
-			continue
-		
-		# First batch has allocation step, do not want to include timings
-		if batch == 0:
-			continue
+        if not isinstance(v, defaultdict):
+            continue
+        
+        # First batch has allocation step, do not want to include timings
+        if batch == 0:
+            continue
 
-		timings['forward'].append(np.mean(v['forward']))
-		timings['adjoint'].append(np.mean(v['adjoint']))
+        timings['forward'].append(np.mean(v['forward']))
+        timings['adjoint'].append(np.mean(v['adjoint']))
 
-	out = {}
-	for k, v in timings.items():
-		out[k] = np.mean(v)
+    out = {}
+    for k, v in timings.items():
+        out[k] = np.mean(v)
 
-	return out
+    return out
 
 fig = plt.figure(figsize=(12, 12))
 ax = fig.add_subplot(111)
@@ -69,22 +69,22 @@ results = defaultdict(list)
 
 for fpath in args.input:
 
-	data = parse_data(fpath)
-	timings = get_timings(data)
+    data = parse_data(fpath)
+    timings = get_timings(data)
 
-	results[data['num_workers']] = {
-		'forward': timings['forward'],
-		'adjoint': timings['adjoint']
-	}
+    results[data['num_workers']] = {
+        'forward': timings['forward'],
+        'adjoint': timings['adjoint']
+    }
 
 xs = []
 ts_fwd = []
 ts_adj = []
 
 for x, v in sorted(results.items(), key=lambda i: i[0]):
-	xs.append(x)
-	ts_fwd.append(v['forward'])
-	ts_adj.append(v['adjoint'])
+    xs.append(x)
+    ts_fwd.append(v['forward'])
+    ts_adj.append(v['adjoint'])
 
 
 ax.plot(xs, ts_fwd, '-o', color='C0', label='forward')

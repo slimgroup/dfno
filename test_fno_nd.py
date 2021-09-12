@@ -25,15 +25,15 @@ layer = DistributedFNONd(P_x, modes=[8, 8, 8, 8], width=20)
 
 x = zero_volume_tensor(x_global_shape[0])
 if P_x.active:
-	x_local_shape = compute_subshape(P_x.shape, P_x.index, x_global_shape)
-	x = torch.randn(*x_local_shape)
+    x_local_shape = compute_subshape(P_x.shape, P_x.index, x_global_shape)
+    x = torch.randn(*x_local_shape)
 
 x.requires_grad = True
 
 y = layer(x)
 dy = zero_volume_tensor(x_global_shape[0], dtype=y.dtype)
 if layer.P_y.active:
-	dy = torch.randn(*y.shape, dtype=y.dtype)
+    dy = torch.randn(*y.shape, dtype=y.dtype)
 
 y.backward(dy)
 dx = x.grad
