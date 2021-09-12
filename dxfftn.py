@@ -22,6 +22,7 @@ class DXFFTN(nn.Module):
 		self.info = info
 
 		if not self.P_x.active:
+			self.P_y = P_x
 			return
 
 		self.transforms = []

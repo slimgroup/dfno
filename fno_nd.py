@@ -29,6 +29,9 @@ class DistributedFNONd(nn.Module):
 		self.width = width
 		self.num_blocks = num_blocks
 
+		if not self.P_x.active:
+			return
+
 		self.dim = P_x.dim
 
 		self.si = ''.join(chr(i+97) for i in range(self.dim-2))
@@ -44,6 +47,9 @@ class DistributedFNONd(nn.Module):
 		self.fc2 = nn.Parameter(torch.rand(128, 1))
 
 	def forward(self, x: Tensor) -> Tensor:
+
+		if not self.P_x.active:
+			return
 
 		x = torch.einsum(self.channel_mul_einsum_equation, x, self.fc0)
 
