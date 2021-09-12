@@ -21,7 +21,7 @@ P_x = P_x_base.create_cartesian_topology_partition([1, 1, 2, 2, 2, 2])
 
 x_global_shape = [8, 10, 16, 16, 16, 16]
 
-layer = DistributedSpectralConvNd(P_x, in_channels=x_global_shape[1], out_channels=x_global_shape[1], modes=[4, 4, 4, 4])
+layer = DistributedSpectralConvNd(P_x, in_channels=x_global_shape[1], out_channels=x_global_shape[1], modes=[8, 8, 8, 8])
 
 x = zero_volume_tensor(x_global_shape[0])
 if P_x.active:
