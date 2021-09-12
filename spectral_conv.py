@@ -31,6 +31,9 @@ class DistributedSpectralConvNd(nn.Module):
         self.P_y = P_y
         self.decomposition_order = decomposition_order
 
+        if not self.P_x.active:
+            return
+
         self.scale = 1 / (in_channels * out_channels)
         self.dim = self.P_x.dim
 
