@@ -1,4 +1,9 @@
 __pycache__/
-*.swp
-figures/
 data/
+*.swp
+*.mat
+*.png
+*.jpg
+*.gif
+*.mp4
+hostfile*

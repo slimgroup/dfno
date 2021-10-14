@@ -1,36 +1,27 @@
-import distdl
+import distdl.nn as dnn
 import numpy as np
 import torch
-import torch.nn as nn
 
-from distdl.utilities.slicing import compute_subshape
-from distdl.utilities.torch import *
+from distdl.utilities.torch import zero_volume_tensor
 from torch import Tensor
-from typing import List, Optional
 
-Partition = distdl.backend.backend.Partition
-
-def check_gradient(P: Partition,
-                   F: nn.Module,
-                   input_shape: List[int],
-                   max_iter: int = 5,
-                   dtype: torch.dtype = torch.float32) -> None:
+def check_gradient(P, F, input_shape, max_iter=5, dtype=torch.float32):
 
     P_0_base = P.create_partition_inclusive([0])
     P_0 = P_0_base.create_cartesian_topology_partition([1]*P.dim)
 
-    S = distdl.nn.DistributedTranspose(P_0, P)
-    G = distdl.nn.DistributedTranspose(P, P_0)
-    B = distdl.nn.Broadcast(P_0, P)
+    S = dnn.DistributedTranspose(P_0, P)
+    G = dnn.DistributedTranspose(P, P_0)
+    B = dnn.Broadcast(P_0, P)
 
-    criterion = distdl.nn.DistributedMSELoss(P)
+    criterion = dnn.DistributedMSELoss(P)
 
     x0 = zero_volume_tensor(input_shape[0], dtype=dtype)
     x = zero_volume_tensor(input_shape[0], dtype=dtype)
 
     if P_0.active:
-        x = torch.randn(input_shape)
-        x0 = x + (1**(-P.dim))*torch.randn(input_shape)
+        x = torch.rand(input_shape)
+        x0 = x + (1**(-P.dim))*torch.rand(input_shape)
 
     x = S(x)
     x0 = S(x0)
