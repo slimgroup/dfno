@@ -1,9 +1,7 @@
 __pycache__/
+.vscode/
 data/
-*.swp
-*.mat
-*.png
-*.jpg
 *.gif
+*.mat
 *.mp4
-hostfile*
+*.png
