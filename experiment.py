@@ -58,8 +58,8 @@ if P_0.active:
     print(f'created output directory: {out_dir.resolve()}')
 
 if P_0.active:
-    #u = torch.rand(args.num_data, 1, 64, 64, args.in_timesteps+args.out_timesteps, dtype=torch.float32)
-    u = torch.tensor(loadmat(args.input)['u'], dtype=torch.float32)[:args.num_data].unsqueeze(1)
+    #u = torch.rand(args.num_data, 1, 64, 64, args.in_timesteps+args.out_timesteps, device=device, dtype=torch.float32)
+    u = torch.tensor(loadmat(args.input)['u'], dtype=torch.float32)[:args.num_data].unsqueeze(1).to(device)
     x_slice = (slice(None, args.num_data, 1), slice(None, None, 1), *[slice(None, None, args.sampling_rate)]*(dim-3), slice(None, args.in_timesteps, 1))
     y_slice = (slice(None, args.num_data, 1), slice(None, None, 1), *[slice(None, None, args.sampling_rate)]*(dim-3), slice(args.in_timesteps, args.in_timesteps+args.out_timesteps, 1))
 
