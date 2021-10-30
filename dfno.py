@@ -184,8 +184,8 @@ class BroadcastedAffineOperator(nn.Module):
             self.W = nn.UninitializedParameter(device=device, dtype=dtype)
             self.b = nn.Parameter(self.b_scale * torch.rand(*self.b_shape, device=device, dtype=dtype)) if bias else None
         else:
-            self.W = nn.Parameter(zero_volume_tensor())
-            self.b = nn.Parameter(zero_volume_tensor()) if bias else None
+            self.W = nn.Parameter(zero_volume_tensor(device=device))
+            self.b = nn.Parameter(zero_volume_tensor(device=device)) if bias else None
 
         self.is_init = False
 
@@ -278,7 +278,7 @@ class DistributedFNONd(nn.Module):
         x = self.fcs[1](x)
         x = F.gelu(x)
 
-        x = self.bn0(x)
+        #x = self.bn0(x)
 
         for S, A in zip(self.sconvs, self.affines):
             x1 = S(x)
@@ -286,7 +286,7 @@ class DistributedFNONd(nn.Module):
             x = x1 + x2
             x = F.gelu(x)
 
-        x = self.bn1(x)
+        #x = self.bn1(x)
 
         x = self.fcs[2](x)
         x = F.gelu(x)

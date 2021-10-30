@@ -27,6 +27,7 @@ parser.add_argument('--sampling-rate',          '-sr', type=int,   default=1)
 parser.add_argument('--in-timesteps',           '-it', type=int,   default=10)
 parser.add_argument('--out-timesteps',          '-ot', type=int,   default=40)
 parser.add_argument('--device',                 '-d',  type=str,   default='cpu')
+parser.add_argument('--num-gpus',               '-ng', type=int,   default=1)
 parser.add_argument('--train-split',            '-ts', type=float, default=0.8)
 parser.add_argument('--width',                  '-w',  type=int,   default=20)
 parser.add_argument('--modes',                  '-m',  type=int,   nargs='+')
@@ -41,7 +42,10 @@ args = parser.parse_args()
 
 P_world, P_x, P_0 = create_standard_partitions(args.partition_shape)
 dim = P_x.dim
-device = torch.device(args.device)
+if args.device == 'cuda':
+    device = torch.device(f'cuda:{P_x.rank % args.num_gpus}')
+else:
+    device = torch.device(args.device)
 
 torch.manual_seed(P_x.rank + 123)
 np.random.seed(P_x.rank + 123)
@@ -78,14 +82,14 @@ if P_0.active:
 
 else:
     data = {}
-    data['x_train'] = zero_volume_tensor()
-    data['x_test'] = zero_volume_tensor()
-    data['y_train'] = zero_volume_tensor()
-    data['y_test'] = zero_volume_tensor()
-    data['mu_x'] = zero_volume_tensor()
-    data['std_x'] = zero_volume_tensor()
-    data['mu_y'] = zero_volume_tensor()
-    data['std_y'] = zero_volume_tensor()
+    data['x_train'] = zero_volume_tensor(device=device)
+    data['x_test'] = zero_volume_tensor(device=device)
+    data['y_train'] = zero_volume_tensor(device=device)
+    data['y_test'] = zero_volume_tensor(device=device)
+    data['mu_x'] = zero_volume_tensor(device=device)
+    data['std_x'] = zero_volume_tensor(device=device)
+    data['mu_y'] = zero_volume_tensor(device=device)
+    data['std_y'] = zero_volume_tensor(device=device)
 
 for k, v in sorted(data.items(), key=lambda i: i[0]):
     S = dnn.DistributedTranspose(P_0, P_x)
@@ -110,14 +114,21 @@ network = DistributedFNONd(P_x,
                            args.out_timesteps,
                            decomposition_order=args.decomposition_order,
                            num_blocks=args.num_blocks,
-                           device=device,
+                           #device=device,
                            dtype=x_train.dtype,
                            P_y=P_x)
 
+dummy = torch.rand(args.batch_size, *x_train.shape[1:], dtype=x_train.dtype)
+with torch.no_grad():
+    _ = network(dummy)
+
+network = network.to(device)
+
 parameters = [p for p in network.parameters()]
-criterion = dnn.DistributedMSELoss(P_x)
-mse = dnn.DistributedMSELoss(P_x)
+criterion = dnn.DistributedMSELoss(P_x).to(device)
+mse = dnn.DistributedMSELoss(P_x).to(device)
 optimizer = torch.optim.Adam(parameters, lr=1e-3, weight_decay=1e-4)
+
 
 if P_0.active and args.generate_visualization:
     steps = []
