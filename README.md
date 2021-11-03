@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/402598642.svg)](https://zenodo.org/badge/latestdoi/402598642)
+
 # Distributed Fourier Neural Operators
 
 Implements a distributed version of [Fourier Neural Operators](https://arxiv.org/pdf/2010.08895.pdf)
