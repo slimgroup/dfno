@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from distdl.utilities.tensor_decomposition import *
 from distdl.utilities.torch import *
-from utils import create_root_partition
+from dfno.utils import create_root_partition
 
 class DXFFTN(nn.Module):
 

@@ -9,19 +9,18 @@ import torch.nn as nn
 
 from argparse import ArgumentParser
 from distdl.utilities.torch import *
-from dfno import DistributedFNONd
+from dfno import *
 from mat73 import loadmat
 from matplotlib.animation import FuncAnimation
 from mpi4py import MPI
 from pathlib import Path
 from scipy import io
-from utils import *
 
 Partition = distdl.backend.backend.Partition
 
 parser = ArgumentParser()
 parser.add_argument('--input',                  '-i',  type=Path)
-parser.add_argument('--partition-shape',        '-ps', type=int,   nargs='+')
+parser.add_argument('--partition-shape',        '-ps', type=int,   default=(1,1,2,2,1), nargs=5)
 parser.add_argument('--num-data',               '-nd', type=int,   default=1000)
 parser.add_argument('--sampling-rate',          '-sr', type=int,   default=1)
 parser.add_argument('--in-timesteps',           '-it', type=int,   default=10)
@@ -30,7 +29,7 @@ parser.add_argument('--device',                 '-d',  type=str,   default='cpu'
 parser.add_argument('--num-gpus',               '-ng', type=int,   default=1)
 parser.add_argument('--train-split',            '-ts', type=float, default=0.8)
 parser.add_argument('--width',                  '-w',  type=int,   default=20)
-parser.add_argument('--modes',                  '-m',  type=int,   nargs='+')
+parser.add_argument('--modes',                  '-m',  type=int,   default=(4, 4, 4), nargs=3)
 parser.add_argument('--decomposition-order',    '-do', type=int,   default=1)
 parser.add_argument('--num-blocks',             '-nb', type=int,   default=4)
 parser.add_argument('--num-epochs',             '-ne', type=int,   default=500)
@@ -39,6 +38,10 @@ parser.add_argument('--checkpoint-interval',    '-ci', type=int,   default=25)
 parser.add_argument('--generate-visualization', '-gv', action='store_true')
 
 args = parser.parse_args()
+
+if np.prod(args.partition_shape) != MPI.COMM_WORLD.size:
+    raise ValueError(f'The number of processes {MPI.COMM_WORLD.size} does not match the partition shape {args.partition_shape}.')
+
 
 P_world, P_x, P_0 = create_standard_partitions(args.partition_shape)
 dim = P_x.dim
