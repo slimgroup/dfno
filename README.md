@@ -22,4 +22,4 @@ or directly install it with pip as a standard pythn package `pip install git+htt
 
 ## Author
 
-This package is writeen by Thomas Grady <tgrady6@gatech.edu> at Georgia Institute of Technology
+This package is written by Thomas Grady <tgrady@gatech.edu> at Georgia Institute of Technology
