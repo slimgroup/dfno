@@ -10,3 +10,5 @@ __pycache__/
 *.swp
 *.zip
 *.pt
+*.stacks
+*.svg
