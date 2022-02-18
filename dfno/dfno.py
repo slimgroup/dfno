@@ -219,7 +219,7 @@ class BroadcastedAffineOperator(nn.Module):
             if not self.is_init:
                 self.in_features = x.shape[self.contraction_dim]
                 self.W_shape = (self.in_features, self.out_features)
-                self.W_scale = 1/(self.in_features*self.out_features)
+                self.W_scale = 0.5#1/(self.in_features*self.out_features)
                 if self.P_0.active:
                     self.W.materialize(self.W_shape, device=self.device, dtype=self.dtype)
                     nn.init.uniform_(self.W, a=0.0, b=self.W_scale)
