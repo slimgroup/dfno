@@ -38,7 +38,7 @@ def bench(input_shape, partition_shape, width, modes, nt, ngpu, benchmark_type, 
 
     P_world, P_x, P_0 = create_standard_partitions(partition_shape)
     device = torch.device('cpu') if args.device == 'cpu' else torch.device(f'cuda:{P_x.rank % ngpu}')
-    outfile = Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}.json')
+    outfile = Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}-{P_x.size}.json')
     data = {}
 
     assert len(input_shape) == len(partition_shape)
@@ -56,7 +56,6 @@ def bench(input_shape, partition_shape, width, modes, nt, ngpu, benchmark_type, 
     y_shape = (*input_shape[:-1], nt)
     x_info = compute_distribution_info(P_x, x_shape)
 
-    criterion = dnn.DistributedMSELoss(P_x).to(device)
     network = DistributedFNONd(P_x, width, modes, nt, device='cpu')
     network.eval()
 
@@ -72,12 +71,25 @@ def bench(input_shape, partition_shape, width, modes, nt, ngpu, benchmark_type, 
 
     if benchmark_type == 'eval':
         with torch.no_grad():
-            network.eval()
             P_x._comm.Barrier()
             t0 = time.time()
             y = network(x)
             t1 = time.time()
             data['dt'] = t1-t0
+
+    else:
+        P_x._comm.Barrier()
+        t0 = time.time()
+        y = network(x)
+        t1 = time.time()
+        data['dt'] = t1-t0
+
+        y1 = torch.ones_like(y)
+        P_x._comm.Barrier()
+        t0 = time.time()
+        y.backward(y1)
+        t1 = time.time()
+        data['dt_grad'] = t1-t0
 
     with open(output_dir.joinpath(outfile), 'w') as f:
         json.dump(data, f)
