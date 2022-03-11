@@ -6,10 +6,13 @@ from pathlib import Path
 import distdl.nn as dnn
 import json
 import gc
+import multiprocessing
 import numpy as np
 import os
 import time
 import torch
+
+from utils import profile_gpu_memory
 
 def compute_distribution_info(P, shape):
     info = {}
@@ -34,10 +37,12 @@ def dls(l, delimiter='_'):
     return out
 
 
-def bench(input_shape, partition_shape, width, modes, nt, ngpu, benchmark_type, output_dir=Path('.')):
+def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_type, output_dir=Path('.')):
 
     P_world, P_x, P_0 = create_standard_partitions(partition_shape)
-    device = torch.device('cpu') if args.device == 'cpu' else torch.device(f'cuda:{P_x.rank % ngpu}')
+
+    device_name = 'cpu' if dev == 'cpu' else f'cuda:{P_x.rank % ngpu}'
+    device = torch.device(device_name)
     outfile = Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}-{P_x.size}.json')
     data = {}
 
@@ -50,13 +55,19 @@ def bench(input_shape, partition_shape, width, modes, nt, ngpu, benchmark_type, 
         os.makedirs(output_dir)
         print(f'created output directory: {output_dir}')
 
+    bench_gpu_mem = True if 'cuda' in device_name else False
+    if bench_gpu_mem and '0' in device_name:
+        outfile_mem = output_dir.joinpath(Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}-{P_x.size}_mem.json'))
+        proc = multiprocessing.Process(target=profile_gpu_memory, args=(outfile_mem, 0.25))
+        proc.start()
+
     P_x._comm.Barrier()
 
     x_shape = input_shape
     y_shape = (*input_shape[:-1], nt)
     x_info = compute_distribution_info(P_x, x_shape)
 
-    network = DistributedFNONd(P_x, width, modes, nt, device='cpu')
+    network = DistributedFNONd(P_x, width, modes, nt, device='cpu', decomposition_order=2)
     network.eval()
 
     dummy = torch.rand(size=tuple(x_info['shape']), device=torch.device('cpu'), dtype=torch.float32)
@@ -94,6 +105,9 @@ def bench(input_shape, partition_shape, width, modes, nt, ngpu, benchmark_type, 
     with open(output_dir.joinpath(outfile), 'w') as f:
         json.dump(data, f)
 
+    if bench_gpu_mem and '0' in device_name:
+        proc.terminate()
+
 if __name__ == '__main__':
 
     from argparse import ArgumentParser
@@ -115,8 +129,9 @@ if __name__ == '__main__':
     width = args.width
     modes = args.modes
     nt = args.num_timesteps
+    device = args.device
     ngpu = args.num_gpus
     benchmark_type = args.benchmark_type
     output_dir = args.output_dir
 
-    bench(input_shape, partition_shape, width, modes, nt, ngpu, benchmark_type, output_dir)
+    bench(input_shape, partition_shape, width, modes, nt, device, ngpu, benchmark_type, output_dir)
