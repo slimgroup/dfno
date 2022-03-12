@@ -4,6 +4,7 @@ import distdl.nn as dnn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import time
 
 from distdl.utilities.tensor_decomposition import *
 from distdl.utilities.torch import *
@@ -21,6 +22,7 @@ class DXFFTN(nn.Module):
         self.transposes = nn.ModuleList([])
         self.transforms = []
         self.transform_kwargs = []
+        self.dt_comm = None
 
         for dims, data in info.items():
             shape = P_x.shape.copy()
@@ -36,10 +38,17 @@ class DXFFTN(nn.Module):
         self.transpose_out = dnn.DistributedTranspose(self.partitions[-1], self.P_y)
 
     def forward(self, x):
+        self.dt_comm = 0
         for T, f, kwargs in zip(self.transposes, self.transforms, self.transform_kwargs):
+            t0 = time.time()
             x = T(x)
+            t1 = time.time()
+            self.dt_comm += t1-t0
             x = f(x, **kwargs)
+        t0 = time.time()
         x = self.transpose_out(x)
+        t1 = time.time()
+        self.dt_comm += t1-t0
         return x
 
 class DistributedSpectralConvNd(nn.Module):
@@ -63,6 +72,7 @@ class DistributedSpectralConvNd(nn.Module):
         self.device = device
         self.dtype = dtype
         self.P_y = P_x if P_y is None else P_y
+        self.dt_comm = None
 
         self.dim = P_x.dim
         self.flag_exp = 2**(self.dim-2)
@@ -97,8 +107,10 @@ class DistributedSpectralConvNd(nn.Module):
         self.eqn = f'xy{chars},yz{chars}->xz{chars}'
 
     def forward(self, x):
-
+        
+        self.dt_comm = 0
         x_ft = self.drfftn(x)
+        self.dt_comm += self.drfftn.dt_comm
 
         with torch.no_grad():
             if not self.is_init:
@@ -151,6 +163,8 @@ class DistributedSpectralConvNd(nn.Module):
                 out_ft[sl] = torch.einsum(self.eqn, x_ft[sl], w)
 
         x_out = self.dirfftn(out_ft)
+        self.dt_comm += self.dirfftn.dt_comm
+
         return x_out
 
 class BroadcastedAffineOperator(nn.Module):
@@ -166,6 +180,7 @@ class BroadcastedAffineOperator(nn.Module):
         self.device = device
         self.dtype = dtype
         self.P_y = P_x if P_y is None else P_y
+        self.dt_comm = None
 
         self.dim = P_x.dim
         self.P_0 = create_root_partition(P_x)
@@ -209,13 +224,26 @@ class BroadcastedAffineOperator(nn.Module):
                     self.W.materialize(self.W_shape, device=self.device, dtype=self.dtype)
                     nn.init.uniform_(self.W, a=0.0, b=self.W_scale)
                 self.is_init = True
-
+        
+        self.dt_comm = 0
+        t0 = time.time()
         W = self.W_bc(self.W)
+        t1 = time.time()
+        self.dt_comm += t1-t0
+
         x = torch.einsum(self.eqn, x, W)
         if self.bias:
+            t0 = time.time()
             b = self.b_bc(self.b)
+            t1 = time.time()
+            self.dt_comm += t1-t0
             x = x + b
+
+        t0 = time.time()
         x = self.T_out(x)
+        t1 = time.time()
+        self.dt_comm += t1-t0
+
         return x
 
 class DistributedFNONd(nn.Module):
@@ -233,6 +261,7 @@ class DistributedFNONd(nn.Module):
         self.dtype = dtype
         self.sconv_dtype = torch.cdouble if dtype == torch.float64 else torch.cfloat
         self.P_y = P_x if P_y is None else P_y
+        self.dt_comm = None
 
         self.dim = P_x.dim
         shape = P_x.shape.copy()
@@ -273,6 +302,8 @@ class DistributedFNONd(nn.Module):
 
     def forward(self, x):
 
+        self.dt_comm = 0
+
         x = self.fcs[0](x)
         x = F.gelu(x)
         x = self.fcs[1](x)
@@ -285,12 +316,20 @@ class DistributedFNONd(nn.Module):
             x2 = A(x)
             x = x1 + x2
             x = F.gelu(x)
+            self.dt_comm += S.dt_comm + A.dt_comm
 
         #x = self.bn1(x)
 
         x = self.fcs[2](x)
         x = F.gelu(x)
         x = self.fcs[3](x)
-
+        
+        t0 = time.time()
         x = self.T_out(x)
+        t1 = time.time()
+        self.dt_comm += t1-t0
+
+        for fc in self.fcs:
+            self.dt_comm += fc.dt_comm
+
         return x

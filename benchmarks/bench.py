@@ -87,6 +87,8 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
             y = network(x)
             t1 = time.time()
             data['dt'] = t1-t0
+            data['dt_comm'] = network.dt_comm
+            data['dt_comp'] = data['dt'] - data['dt_comm']
 
     else:
         P_x._comm.Barrier()
@@ -94,6 +96,8 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
         y = network(x)
         t1 = time.time()
         data['dt'] = t1-t0
+        data['dt_comm'] = network.dt_comm
+        data['dt_comp'] = data['dt'] - data['dt_comm']
 
         y1 = torch.ones_like(y)
         P_x._comm.Barrier()
