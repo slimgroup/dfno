@@ -8,7 +8,7 @@ def format_runs(runs, data_dir, shape, modes, run_type):
     out += f"data_dir={data_dir}\n"
 
     for nprocs, partition_shape in runs:
-        out += f"mpirun -np {nprocs} --bind-to core --map-by numa:PE=1 python3 bench.py -is "
+        out += f"jsrun -n {nprocs} --cpus_per_rs=7 --rs_per_host=6 --tasks_per_rs=1 --gpu_per_rs=1 --bind=rs python3 bench.py -is "
 
         shape_np = [s*ps for s, ps in zip(shape, partition_shape[:-1])]
         shape_np.append(1)
