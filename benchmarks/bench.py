@@ -56,9 +56,10 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
         print(f'created output directory: {output_dir}')
 
     bench_gpu_mem = True if 'cuda' in device_name else False
-    if bench_gpu_mem and '0' in device_name:
+    if bench_gpu_mem:
         outfile_mem = output_dir.joinpath(Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}-{P_x.size}_mem.json'))
         proc = multiprocessing.Process(target=profile_gpu_memory, args=(outfile_mem, 0.25))
+        proc.daemon = True
         proc.start()
 
     P_x._comm.Barrier()
@@ -69,7 +70,7 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
 
     network = DistributedFNONd(P_x, width, modes, nt, device='cpu', decomposition_order=2)
     network.eval()
-
+    
     dummy = torch.rand(size=tuple(x_info['shape']), device=torch.device('cpu'), dtype=torch.float32)
     y = network(dummy)
     del dummy
@@ -108,9 +109,6 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
 
     with open(output_dir.joinpath(outfile), 'w') as f:
         json.dump(data, f)
-
-    if bench_gpu_mem and '0' in device_name:
-        proc.terminate()
 
 if __name__ == '__main__':
 
