@@ -44,16 +44,16 @@ def gradient_test(f: Callable[[Tensor], Tensor], input_shape: List[int], max_ite
     def ip(p, q):
         return torch.inner(p.flatten(), q.flatten()).cpu().item()
 
-    for j in range(max_iter):
+    for i in range(max_iter):
         x_new = x0+h*dx
         y_new = f(x_new)
-        f_new = L(y, y_new).item()
+        fi = L(y, y_new).item()
         
-        err1.append(abs(f_new-f0))
-        err2.append(abs(f_new-f0 - h*ip(dx, x_grad)))
+        err1.append(abs(fi-f0))
+        err2.append(abs(fi-f0 - h*ip(dx, x_grad)))
         hs.append(h)
 
-        print(h, f_new, f0, h, ip(x_grad, dx), f_new-f0, h*ip(x_grad, dx), f_new-f0 - h*ip(x_grad, dx))
+        print(h, fi, f0, h, ip(x_grad, dx), fi-f0, h*ip(x_grad, dx), fi-f0 - h*ip(x_grad, dx))
 
         h /= 2
 
