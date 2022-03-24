@@ -24,4 +24,5 @@ def profile_gpu_memory(outfile, dt=1.0):
                 if i < len(muv)-1:
                     f.write(', ')
             f.write('\n')
+            f.flush()
             time.sleep(dt)
