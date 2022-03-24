@@ -19,6 +19,7 @@ def profile_gpu_memory(outfile, dt=1.0):
     with open(outfile, 'w') as f:
         while True:
             muv = get_gpu_memory()
+            f.write(f'{str(time.time())}, ')
             for i, m in enumerate(muv):
                 f.write(str(m))
                 if i < len(muv)-1:
