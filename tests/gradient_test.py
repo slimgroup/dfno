@@ -15,23 +15,26 @@ class GradientTestResult:
     polyfit: Tuple[List[float], List[float]]
 
     def __str__(self):
+        c0 = [f'{x:.2e}' for x in self.convergence[0]]
+        c1 = [f'{x:.2e}' for x in self.convergence[1]]
+        steps = [f'{x:.2e}' for x in self.steps]
         s = f'==== {self.name} ====\n'
         s += f'active: {self.active}\n'
         s += f'converged:\n'
         s += f'\tO(h):   {self.converged[0]}\n'
         s += f'\tO(h^2): {self.converged[1]}\n'
         s += f'convergence:\n'
-        s += f'\tO(h)   err = {self.convergence[0]}\n'
-        s += f'\tO(h^2) err = {self.convergence[1]}\n'
+        s += f'\tO(h)   err = {c0}\n'
+        s += f'\tO(h^2) err = {c1}\n'
         s += f'steps:\n'
-        s += f'\t h = {self.steps}\n'
+        s += f'\t h = {steps}\n'
         s += f'polyfit:\n'
         if self.active:
-            s += f'\tO(h)   poly = {self.polyfit[0][0]}h + {self.polyfit[0][1]}\n'
-            s += f'\tO(h^2) poly = {self.polyfit[1][0]}h + {self.polyfit[1][1]}'
+            s += f'\tO(h)   poly = {self.polyfit[0][0]:.2e}h + {self.polyfit[0][1]:.2e}\n'
+            s += f'\tO(h^2) poly = {self.polyfit[1][0]:.2e}h + {self.polyfit[1][1]:.2e}'
         else:
             s += f'\tO(h)   poly = N/A\n'
-            s += f'\tO(h^2) poly = N/A\n'
+            s += f'\tO(h^2) poly = N/A'
         return s
 
 def gradient_test(f: nn.Module,
@@ -68,10 +71,12 @@ def gradient_test(f: nn.Module,
 
         f0 = loss(x1, y0)
         f0.backward()
-        
+
         active = True
         try:
             g0 = p.grad.detach()
+            if g0.nelement() == 0:
+                active = False
             gdx = torch.dot(dp.flatten(), g0.flatten())
             f0, gdx = f0.detach().item(), gdx.detach().item()
         except AttributeError:
@@ -112,7 +117,7 @@ def gradient_test(f: nn.Module,
         err1_converged, err2_converged = False, False
         if active:
             p1 = np.polyfit(np.log10(hs), np.log10(err1), 1)
-            p2 = np.polyfit(np.log10(hs), np.log10(err2), 1)
+            p2 = np.polyfit(np.log10(hs)/f.P_x.size, np.log10(err2), 1)
             err1_converged = np.isclose(p1[0], 1.0, rtol=0.1)
             err2_converged = np.isclose(p2[0], 2.0, rtol=0.1)
             
