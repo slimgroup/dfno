@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from torch import Tensor
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Generator, List, Tuple, Optional
 
 import numpy as np
 import torch
@@ -8,55 +7,121 @@ import torch.nn as nn
 
 @dataclass
 class GradientTestResult:
-    converged: bool
-    convergence: Tuple[List[float], List[float], List[float]]
+    name: str
+    active: bool
+    converged: Tuple[bool, bool]
+    convergence: Tuple[List[float], List[float]]
+    steps: List[float]
+    polyfit: Tuple[List[float], List[float]]
 
     def __str__(self):
-        return f'{self.converged}, {self.convergence[0]}, {self.convergence[1]}, {self.convergence[2]}'
+        s = f'==== {self.name} ====\n'
+        s += f'active: {self.active}\n'
+        s += f'converged:\n'
+        s += f'\tO(h):   {self.converged[0]}\n'
+        s += f'\tO(h^2): {self.converged[1]}\n'
+        s += f'convergence:\n'
+        s += f'\tO(h)   err = {self.convergence[0]}\n'
+        s += f'\tO(h^2) err = {self.convergence[1]}\n'
+        s += f'steps:\n'
+        s += f'\t h = {self.steps}\n'
+        s += f'polyfit:\n'
+        if self.active:
+            s += f'\tO(h)   poly = {self.polyfit[0][0]}h + {self.polyfit[0][1]}\n'
+            s += f'\tO(h^2) poly = {self.polyfit[1][0]}h + {self.polyfit[1][1]}'
+        else:
+            s += f'\tO(h)   poly = N/A\n'
+            s += f'\tO(h^2) poly = N/A\n'
+        return s
 
-def gradient_test(f: Callable[[Tensor], Tensor], input_shape: List[int], max_iter: int = 10) -> GradientTestResult:
-    
-    n = len(input_shape)
-    L = nn.MSELoss()
+def gradient_test(f: nn.Module,
+                  input_shape: List[int],
+                  max_iter: int = 10,
+                  dtype: torch.dtype = torch.float64) -> Generator[GradientTestResult, None, None]:
 
-    x  = torch.rand(*input_shape)
-    x0 = x+ 1**(-n)*torch.rand(*input_shape)
-    dx = x-x0
+    def inner(p: nn.Parameter) -> GradientTestResult:
 
-    x.requires_grad = True
-    x0.requires_grad = True
+        def loss(x, y):
+            try:
+                p.grad.zero_()
+            except AttributeError:
+                pass
+            return .5*torch.norm(f(x) - y)**2
 
-    y  = f(x)
-    y0 = f(x0)
-    dy = y-y0
-    y.backward(dy)
+        # Get the value that was stored in p initially
+        p_init = p.data
 
-    f0 = L(y, y0).item()
+        # Set intial weights and perturbation 
+        p0 = 1 + torch.rand(*p.shape, dtype=p.dtype)
+        dp = 1e-3*(1 + torch.rand(*p.shape, dtype=p.dtype))
 
-    x_grad = x.grad.detach()
-    x = x.detach()
-    x0 = x0.detach()
-    dx = dx.detach()
+        # Initial inputs
+        x0 = 1 + torch.rand(*input_shape, dtype=dtype)
+        x1 = 1 + torch.rand(*input_shape, dtype=dtype)
 
-    err1, err2, hs = [], [], []
-    h = 1e-2
+        # Intialize layer
+        p.data = p0
 
-    def ip(p, q):
-        return torch.inner(p.flatten(), q.flatten()).cpu().item()
+        # Loss and gradient at x1
+        with torch.no_grad():
+            y0 = f(x0)
 
-    for i in range(max_iter):
-        x_new = x0+h*dx
-        y_new = f(x_new)
-        fi = L(y, y_new).item()
+        f0 = loss(x1, y0)
+        f0.backward()
         
-        err1.append(abs(fi-f0))
-        err2.append(abs(fi-f0 - h*ip(dx, x_grad)))
-        hs.append(h)
+        active = True
+        try:
+            g0 = p.grad.detach()
+            gdx = torch.dot(dp.flatten(), g0.flatten())
+            f0, gdx = f0.detach().item(), gdx.detach().item()
+        except AttributeError:
+            # In a distributed setting, it is not always the case that a parameter
+            # has a gradient w.r.t the input
+            active = False
 
-        print(h, fi, f0, h, ip(x_grad, dx), fi-f0, h*ip(x_grad, dx), fi-f0 - h*ip(x_grad, dx))
+        # Compute taylor error for varying step size
+        err1 = []
+        err2 = []
+        hs = []
+        h = 1
 
-        h /= 2
+        for i in range(max_iter):
 
-    p1 = np.polyfit(np.log10(hs), np.log10(err1), 1)
-    p2 = np.polyfit(np.log10(hs), np.log10(err2), 1)
-    print(p1, p2)
+            # Perturb weight
+            p.data = p0 + h*dp
+
+            # Get f(x+dx))
+            fk = loss(x1, y0)
+            fk = float(fk.detach())
+            
+            # Only compute error terms if the parameter is active
+            if active:
+                # First order error
+                # Per taylor, we have `f(x+dx) = f(x) + O(h)` so this should decrease linearly with h
+                err1.append(abs(fk - f0))
+
+                # Second order error
+                # Per taylor, we have `f(x+dx) = f(x) + h*<g, dw> + O(h^2)` so this should decrease
+                # quadratically with h
+                err2.append(abs(fk - f0 - h*gdx))
+            
+            hs.append(h)
+            h = h/2
+        
+        p1, p2 = [], []
+        err1_converged, err2_converged = False, False
+        if active:
+            p1 = np.polyfit(np.log10(hs), np.log10(err1), 1)
+            p2 = np.polyfit(np.log10(hs), np.log10(err2), 1)
+            err1_converged = np.isclose(p1[0], 1.0, rtol=0.1)
+            err2_converged = np.isclose(p2[0], 2.0, rtol=0.1)
+            
+        # Reset parameter once we are finished with it
+        p.data = p_init
+
+        return GradientTestResult('', active, (err1_converged, err2_converged), (err1, err2), hs, (p1, p2))
+    
+    for name, p in f.named_parameters():
+        gt = inner(p)
+        gt.name = name
+        yield gt
