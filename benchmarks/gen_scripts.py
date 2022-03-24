@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 
 def format_runs(runs, data_dir, shape, modes, run_type):
-    out = r"#!/bin/bash" + "\n\n"
+    out = r"#!/bin/bash" + "\nset -x" + "\n\n"
     out += f"data_dir={data_dir}\n"
 
     for nprocs, partition_shape in runs:
