@@ -16,10 +16,10 @@ Partition = distdl.backend.backend.Partition
 @dataclass
 class GradientTestResult:
     converged: bool
-    convergence: Tuple[List[float], List[float]]
+    convergence: Tuple[List[float], List[float], List[float]]
 
     def __str__(self):
-        return f'{self.converged}, {self.convergence[0]}, {self.convergence[1]}'
+        return f'{self.converged}, {self.convergence[0]}, {self.convergence[1]}, {self.convergence[2]}'
 
 def compute_distribution_info(P, shape):
     info = {}
@@ -78,6 +78,7 @@ def gradient_test(P: Partition,
         h = torch.tensor([1e-3*f0], device=device)
         err1 = []
         err2 = []
+        hs = []
 
     h = B(h)
 
@@ -90,6 +91,7 @@ def gradient_test(P: Partition,
         if P_0.active:
             err1.append(abs(f-f0))
             err2.append(abs(f - f0 + h*torch.inner(dx.flatten(), x_grad.flatten())).cpu().item())
+            hs.append(h.cpu().item())
             h = h/(2*f0)
 
         else:
@@ -101,7 +103,7 @@ def gradient_test(P: Partition,
         err1_converged = np.isclose((err1[-1]/(err1[0]/2**(max_iter-1))), f0, atol=f0)
         err2_converged = np.isclose((err2[-1]/(err2[0]/4**(max_iter-1))), f0, atol=f0)
         converged = err1_converged and err2_converged
-        return GradientTestResult(converged, (err1, err2))
+        return GradientTestResult(converged, (err1, err2, hs))
 
     else:
         return None
