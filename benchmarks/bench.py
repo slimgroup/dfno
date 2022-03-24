@@ -110,6 +110,10 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
     with open(output_dir.joinpath(outfile), 'w') as f:
         json.dump(data, f)
 
+    if bench_gpu_mem:
+        proc.terminate()
+        proc.kill()
+
 if __name__ == '__main__':
 
     from argparse import ArgumentParser
