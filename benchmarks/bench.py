@@ -11,6 +11,7 @@ import numpy as np
 import os
 import time
 import torch
+import traceback
 
 from utils import profile_gpu_memory
 
@@ -63,26 +64,36 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
         proc.start()
 
     P_x._comm.Barrier()
-
-    x_shape = input_shape
-    y_shape = (*input_shape[:-1], nt)
-    x_info = compute_distribution_info(P_x, x_shape)
-
-    network = DistributedFNONd(P_x, width, modes, nt, device='cpu', decomposition_order=2)
-    network.eval()
     
-    dummy = torch.rand(size=tuple(x_info['shape']), device=torch.device('cpu'), dtype=torch.float32)
-    y = network(dummy)
-    del dummy
-    del y
-    gc.collect()
+    try:
+        x_shape = input_shape
+        y_shape = (*input_shape[:-1], nt)
+        x_info = compute_distribution_info(P_x, x_shape)
 
-    network.to(device)
-    P_x._comm.Barrier()
-    x = torch.rand(size=tuple(x_info['shape']), device=device, dtype=torch.float32)
+        network = DistributedFNONd(P_x, width, modes, nt, device='cpu', decomposition_order=2)
+        network.eval()
+        
+        dummy = torch.rand(size=tuple(x_info['shape']), device=torch.device('cpu'), dtype=torch.float32)
+        y = network(dummy)
+        del dummy
+        del y
+        gc.collect()
 
-    if benchmark_type == 'eval':
-        with torch.no_grad():
+        network.to(device)
+        P_x._comm.Barrier()
+        x = torch.rand(size=tuple(x_info['shape']), device=device, dtype=torch.float32)
+
+        if benchmark_type == 'eval':
+            with torch.no_grad():
+                P_x._comm.Barrier()
+                t0 = time.time()
+                y = network(x)
+                t1 = time.time()
+                data['dt'] = t1-t0
+                data['dt_comm'] = network.dt_comm
+                data['dt_comp'] = data['dt'] - data['dt_comm']
+
+        else:
             P_x._comm.Barrier()
             t0 = time.time()
             y = network(x)
@@ -91,24 +102,19 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
             data['dt_comm'] = network.dt_comm
             data['dt_comp'] = data['dt'] - data['dt_comm']
 
-    else:
-        P_x._comm.Barrier()
-        t0 = time.time()
-        y = network(x)
-        t1 = time.time()
-        data['dt'] = t1-t0
-        data['dt_comm'] = network.dt_comm
-        data['dt_comp'] = data['dt'] - data['dt_comm']
+            y1 = torch.ones_like(y)
+            P_x._comm.Barrier()
+            t0 = time.time()
+            y.backward(y1)
+            t1 = time.time()
+            data['dt_grad'] = t1-t0
 
-        y1 = torch.ones_like(y)
-        P_x._comm.Barrier()
-        t0 = time.time()
-        y.backward(y1)
-        t1 = time.time()
-        data['dt_grad'] = t1-t0
+        with open(output_dir.joinpath(outfile), 'w') as f:
+            json.dump(data, f)
 
-    with open(output_dir.joinpath(outfile), 'w') as f:
-        json.dump(data, f)
+    except:
+        # catch errors to avoid hanging
+        traceback.print_exc()
 
     if bench_gpu_mem:
         proc.terminate()
