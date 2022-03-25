@@ -33,7 +33,7 @@ def format_runs(runs, data_dir, shape, modes, run_type, mode='spatial'):
         for x in partition_shape:
             out += f'{x} '
 
-        out += f'-w 20 -nt {nt} -d cuda -ngpu 4 -bt {run_type} -o $data_dir\n'
+        out += f'-w 20 -nt {nt} -d cuda -ngpu 1 -bt {run_type} -o $data_dir\n'
 
     return out
 
