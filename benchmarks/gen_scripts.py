@@ -7,8 +7,12 @@ import os
 def format_runs(runs, data_dir, shape, modes, run_type, mode='spatial'):
     out = r'#!/bin/bash' + '\nset -x' + '\n\n'
     out += f'data_dir={data_dir}\n'
+    out += ("if [ $# -gt 0 ]; then\n"
+            "  ranks=$1\n"
+            "fi\n")
 
     for nprocs, partition_shape in runs:
+        out += f"[[ $ranks -eq '{nprocs}' ]] && "
         out += f'jsrun -n {nprocs} --cpu_per_rs=7 --rs_per_host={min(nprocs, 6)} --tasks_per_rs=1 --gpu_per_rs=1 --bind=rs python3 bench.py -is '
         #out += f'mpirun -np {nprocs} python3 bench.py -is '
         
@@ -21,6 +25,17 @@ def format_runs(runs, data_dir, shape, modes, run_type, mode='spatial'):
             shape_np = [*shape[:-1], 1]
             modes_np = [*modes[:-1], np.prod(partition_shape)*modes[-1]]
             nt = np.prod(partition_shape)*shape[-1]
+        
+        shape_in = [*shape_np[:-1], nt]
+        p1, p2 = partition_shape[2]*partition_shape[4], partition_shape[3]*partition_shape[5]
+        if p1 > shape_in[2]:
+            raise Exception(f'Invalid configuration. Partitions {partition_shape} and input shape {shape_in} would produce zero-size at dimension 2')
+        if p1 > shape_in[4]:
+            raise Exception(f'Invalid configuration. Partitions {partition_shape} and input shape {shape_in} would produce zero-size at dimension 4')
+        if p2 > shape_in[3]:
+            raise Exception(f'Invalid configuration. Partitions {partition_shape} and input shape {shape_in} would produce zero-size at dimension 3')
+        if p2 > shape_in[5]:
+            raise Exception(f'Invalid configuration. Partitions {partition_shape} and input shape {shape_in} would produce zero-size at dimension 5')
 
         for x in shape_np:
             out += f'{x} '
