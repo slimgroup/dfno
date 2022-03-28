@@ -1,4 +1,4 @@
-distdl@ git+https://github.com/distdl/distdl.git@master
+distdl@ git+https://github.com/thomasjgrady/distdl.git@cuda-aware
 mat73
 matplotlib
 mpi4py
