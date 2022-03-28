@@ -6,6 +6,7 @@ from typing import Any, List, Tuple, Dict
 import distdl
 import distdl.nn as dnn
 import numpy as np
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -55,6 +56,7 @@ class BroadcastedLinear(nn.Module):
         self.out_features = out_features
         self.scale = 1/np.sqrt(in_features*out_features)
         self.bias = bias
+        self.dt_comm = 0
         
         self.b_shape = [1]*P_x.dim
         self.b_shape[dim] = out_features
@@ -79,9 +81,12 @@ class BroadcastedLinear(nn.Module):
         self.eqn = f"{w_chars},{''.join(x_chars)}->{''.join(y_chars)}"
 
     def forward(self, x: Tensor) -> Tensor:
-
+        
+        self.dt_comm = 0
+        t0 = time.time()
         W = self.W_bcast(self.W)
         b = self.b_bcast(self.b)
+        self.dt_comm += (time.time()-t0)
         y = torch.einsum(self.eqn, W, x)
         if self.bias:
             y += b
@@ -101,6 +106,7 @@ class ParallelFNOBlock(nn.Module):
         self.device = device
         self.dtype = dtype
         self.dtype_complex = torch.complex64 if dtype == torch.float32 else torch.complex128
+        self.dt_comm = 0
 
         # Setup FFT partitions
         shape_m = P_x.shape.copy()
@@ -185,11 +191,17 @@ class ParallelFNOBlock(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
 
+        self.dt_comm = 0
         y0 = self.linear(x)
-
+        self.dt_comm += self.linear.dt_comm
+        
+        t0 = time.time()
         x = self.R1(x)
+        self.dt_comm += (time.time()-t0)
         x = torch.fft.rfftn(x, dim=tuple(self.dim_m))
+        t0 = time.time()
         x = self.R2(x)
+        self.dt_comm += (time.time()-t0)
         x = torch.fft.fftn(x, dim=tuple(self.dim_y))
 
         y = 0*x.clone()
@@ -197,9 +209,13 @@ class ParallelFNOBlock(nn.Module):
             y[sl] = torch.einsum(self.eqn, x[sl], w)
 
         y = torch.fft.ifftn(y, dim=tuple(self.dim_y))
+        t0 = time.time()
         y = self.R3(y)
+        self.dt_comm += (time.time()-t0)
         y = torch.fft.irfftn(y, dim=tuple(self.dim_m))
+        t0 = time.time()
         y = self.R4(y)
+        self.dt_comm += (time.time()-t0)
 
         return F.gelu(y0 + y)
 
@@ -217,6 +233,7 @@ class ParallelFNO(nn.Module):
         self.num_blocks = num_blocks
         self.device = device
         self.dtype = dtype
+        self.dt_comm = 0
 
         self.block_in_shape = [in_shape[0], width, *in_shape[2:-1], out_timesteps]
 
@@ -236,7 +253,8 @@ class ParallelFNO(nn.Module):
         ])
 
     def forward(self, x: Tensor) -> Tensor:
-
+    
+        self.dt_comm = 0
         x = self.linear1(x)
         x = F.gelu(x)
         x = self.linear2(x)
@@ -244,10 +262,12 @@ class ParallelFNO(nn.Module):
 
         for block in self.blocks:
             x = block(x)
+            self.dt_comm += block.dt_comm
 
         x = self.linear3(x)
         x = F.gelu(x)
         x = self.linear4(x)
+        self.dt_comm += self.linear1.dt_comm + self.linear2.dt_comm + self.linear3.dt_comm + self.linear4.dt_comm
         return x
 
 if __name__ == '__main__':
