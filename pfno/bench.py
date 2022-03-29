@@ -82,6 +82,12 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
         network.eval()
         
         with cupy.cuda.Device(device_ordinal):
+            
+            # preallocate exchange buffers
+            dummy = network(x)
+            del dummy
+            gc.collect()
+
             if benchmark_type == 'eval':
                 with torch.no_grad():
                     P_x._comm.Barrier()
