@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from loss import DistributedRelativeLpLoss
 
 # Partitions
-n = 12
+n = 4
 P_world, P_x, P_root = create_standard_partitions((1, 1, 1, n, 1, 1))
 num_gpus = n
 device_ordinal = P_x.rank % num_gpus
@@ -29,82 +29,81 @@ except:
     from contextlib import nullcontext
     ctx = nullcontext()
 
-# Load env vars
-load_dotenv()
+with ctx:
+    # Load env vars
+    load_dotenv()
 
-# Reproducibility
-torch.manual_seed(P_x.rank + 123)
-np.random.seed(P_x.rank + 123)
+    # Reproducibility
+    torch.manual_seed(P_x.rank + 123)
+    np.random.seed(P_x.rank + 123)
 
-# Data dimensions
-nb = 1
-shape = (60, 60, 64, 30)    # X Y Z T
-num_train = 1
-num_valid = 1
+    # Data dimensions
+    nb = 1
+    shape = (60, 60, 64, 10)    # X Y Z T
+    num_train = 1
+    num_valid = 1
 
-# Network dimensions
-channel_in = 2
-width = 20
-channel_out = 1
-modes = (12, 12, 12, 8)
+    # Network dimensions
+    channel_in = 2
+    width = 20
+    channel_out = 1
+    modes = (12, 12, 12, 4)
 
-# Data store
-container = os.environ['CONTAINER']
-data_path = os.environ['DATA_PATH']
+    # Data store
+    container = os.environ['CONTAINER']
+    data_path = os.environ['DATA_PATH']
 
-client = azure.storage.blob.ContainerClient(
-    account_url=os.environ['ACCOUNT_URL'],
-    container_name=container,
-    credential=os.environ['SLEIPNER_CREDENTIALS']
+    client = azure.storage.blob.ContainerClient(
+        account_url=os.environ['ACCOUNT_URL'],
+        container_name=container,
+        credential=os.environ['SLEIPNER_CREDENTIALS']
+        )
+
+    # Training dataset
+    train_idx = torch.linspace(1, num_train, num_train, dtype=torch.int32).long()
+    train_data = DistributedSleipnerDataset3D(P_x, train_idx, client, container, data_path, shape,
+            normalize=True)
+
+    # Validation dataset
+    #val_idx = torch.linspace(0, num_train+num_valid, num_valid, dtype=torch.int32).long()
+    val_idx = train_idx
+    valid_data = DistributedSleipnerDataset3D(P_x, val_idx, client, container, data_path, shape,
+            normalize=True)
+
+    # Dataloaders
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=nb, shuffle=False)
+    valid_loader = torch.utils.data.DataLoader(valid_data, batch_size=nb, shuffle=False)
+    P_world._comm.Barrier()
+
+    # FNO
+    pfno = ParallelFNO(
+            P_x,
+            [nb, channel_in, *shape[:-1], 1],
+            shape[-1],
+            width,
+            modes,
+            device=device,
+            dtype=dtype
     )
 
-# Training dataset
-train_idx = torch.linspace(1, num_train, num_train, dtype=torch.int32).long()
-train_data = DistributedSleipnerDataset3D(P_x, train_idx, client, container, data_path, shape,
-        normalize=True)
+    # Training
+    num_epochs = 100
+    checkpoint_interval = 10
+    out_dir = '/home/azureuser/dfno/pfno/data'
+    #out_dir = '/datadrive/thomas'
 
-# Validation dataset
-#val_idx = torch.linspace(0, num_train+num_valid, num_valid, dtype=torch.int32).long()
-val_idx = train_idx
-valid_data = DistributedSleipnerDataset3D(P_x, val_idx, client, container, data_path, shape,
-        normalize=True)
+    parameters = [p for p in pfno.parameters()]
+    #criterion = distdl.nn.DistributedMSELoss(P_x).to(device)
+    criterion = DistributedRelativeLpLoss(P_x).to(device)
+    if len(parameters) > 0:
+        optimizer = torch.optim.Adam(parameters, lr=1e-3)
+    else:
+        optimizer = None
 
-# Dataloaders
-train_loader = torch.utils.data.DataLoader(train_data, batch_size=nb, shuffle=False)
-valid_loader = torch.utils.data.DataLoader(valid_data, batch_size=nb, shuffle=False)
-P_world._comm.Barrier()
-
-# FNO
-pfno = ParallelFNO(
-        P_x,
-        [nb, channel_in, *shape[:-1], 1],
-        shape[-1],
-        width,
-        modes,
-        device=device,
-        dtype=dtype
-)
-
-# Training
-num_epochs = 100
-checkpoint_interval = 10
-#out_dir = '/home/azureuser/dfno/pfno/data'
-out_dir = '/datadrive/thomas'
-
-parameters = [p for p in pfno.parameters()]
-#criterion = distdl.nn.DistributedMSELoss(P_x).to(device)
-criterion = DistributedRelativeLpLoss(P_x).to(device)
-if len(parameters) > 0:
-    optimizer = torch.optim.Adam(parameters, lr=1e-3)
-else:
-    optimizer = None
-
-# Keep track of loss history
-if P_root.active:
-    train_accs = []
-    valid_accs = []
-
-with ctx:
+    # Keep track of loss history
+    if P_root.active:
+        train_accs = []
+        valid_accs = []
 
     # Training loop
     for i in range(num_epochs):

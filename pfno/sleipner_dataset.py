@@ -1,4 +1,4 @@
-from dfno import create_standard_partitions
+from pfno import create_standard_partitions
 from distdl.utilities.slicing import *
 from distdl.utilities.tensor_decomposition import *
 from distdl.utilities.torch import *

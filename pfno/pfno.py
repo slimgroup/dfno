@@ -79,10 +79,17 @@ class BroadcastedLinear(nn.Module):
         w_chars = 'oi'
         self.eqn = f"{w_chars},{''.join(x_chars)}->{''.join(y_chars)}"
 
-    def forward(self, x: Tensor) -> Tensor:
+        self.dt_comm = 0
 
+    def forward(self, x: Tensor) -> Tensor:
+        self.dt_comm = 0
+        
+        t0 = time.time()
         W = self.W_bcast(self.W)
         b = self.b_bcast(self.b)
+        t1 = time.time()
+        self.dt_comm += (t1-t0)
+
         y = torch.einsum(self.eqn, W, x)
         if self.bias:
             y += b
@@ -184,13 +191,23 @@ class ParallelFNOBlock(nn.Module):
         # Linear pass-through layer
         self.linear = BroadcastedLinear(self.P_x, self.width, self.width, bias=False, dim=1, device=device, dtype=dtype)
 
+        self.dt_comm = 0
+
     def forward(self, x: Tensor) -> Tensor:
+        self.dt_comm = 0
 
         y0 = self.linear(x)
-
+        
+        t0 = time.time()
         x = self.R1(x)
+        self.dt_comm += (time.time()-t0)
+
         x = torch.fft.rfftn(x, dim=tuple(self.dim_m))
+
+        t0 = time.time()
         x = self.R2(x)
+        self.dt_comm += (time.time()-t0)
+
         x = torch.fft.fftn(x, dim=tuple(self.dim_y))
 
         y = 0*x.clone()
@@ -198,9 +215,16 @@ class ParallelFNOBlock(nn.Module):
             y[sl] = torch.einsum(self.eqn, x[sl], w)
 
         y = torch.fft.ifftn(y, dim=tuple(self.dim_y))
+
+        t0 = time.time()
         y = self.R3(y)
+        self.dt_comm += (time.time()-t0)
+
         y = torch.fft.irfftn(y, dim=tuple(self.dim_m))
+
+        t0 = time.time()
         y = self.R4(y)
+        self.dt_comm += (time.time()-t0)
 
         return F.gelu(y0 + y)
 
@@ -223,8 +247,8 @@ class ParallelFNO(nn.Module):
 
         self.linear1 = BroadcastedLinear(P_x, in_shape[-1], out_timesteps, dim=-1, device=device, dtype=dtype)
         self.linear2 = BroadcastedLinear(P_x, in_shape[1],  width, dim=1, device=device, dtype=dtype)
-        self.linear3 = BroadcastedLinear(P_x, width, 30, dim=1, device=device, dtype=dtype)
-        self.linear4 = BroadcastedLinear(P_x, 30, 1, dim=1, device=device, dtype=dtype)
+        self.linear3 = BroadcastedLinear(P_x, width, 128, dim=1, device=device, dtype=dtype)
+        self.linear4 = BroadcastedLinear(P_x, 128, 1, dim=1, device=device, dtype=dtype)
 
         self.blocks = nn.ModuleList([
             ParallelFNOBlock(
@@ -239,23 +263,31 @@ class ParallelFNO(nn.Module):
         self.bn1 = dnn.DistributedBatchNorm(P_x, self.width)
         self.bn2 = dnn.DistributedBatchNorm(P_x, self.width)
 
+        self.dt_comm = 0
+
     def forward(self, x: Tensor) -> Tensor:
+        self.dt_comm = 0
 
         x = self.linear1(x)
+        self.dt_comm += self.linear1.dt_comm
         x = F.gelu(x)
         x = self.linear2(x)
+        self.dt_comm += self.linear2.dt_comm
         x = F.gelu(x)
 
         #x = self.bn1(x)
 
         for block in self.blocks:
             x = block(x)
+            self.dt_comm += block.dt_comm
 
         #x = self.bn2(x)
 
         x = self.linear3(x)
+        self.dt_comm += self.linear3.dt_comm
         x = F.gelu(x)
         x = self.linear4(x)
+        self.dt_comm += self.linear2.dt_comm
         return x
 
 if __name__ == '__main__':

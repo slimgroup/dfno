@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-requirements = ['distdl @ git+https://github.com/thomasjgrady/distdl.git@cuda-aware', 'mat73', 'matplotlib', 'mpi4py', 'numpy', 'scipy', 'torch']
+requirements = ['distdl @ git+https://github.com/thomasjgrady/distdl.git@cuda-aware-2', 'mat73', 'matplotlib', 'mpi4py', 'numpy', 'scipy', 'torch']
 
 setup(
     name = 'dfno',
