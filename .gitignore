@@ -1,7 +1,14 @@
 __pycache__/
 .vscode/
-data/
 *.gif
 *.mat
 *.mp4
 *.png
+*.h5
+*.npy
+*.env
+*.swp
+*.zip
+*.pt
+*.stacks
+*.svg

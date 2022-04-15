@@ -1,0 +1,21 @@
+#set your project id: NOTE: THIS IS ***MY**** PROJECT ID. Make it yours!! The rest of the instructions won't work without it!
+export MYPROJ=csc471
+
+#choose a folder to store the files on the scratch disk. 
+#It needs to be readable and writeable by the compute nodes on summit
+export MYWORK=/gpfs/alpine/scratch/$USER/$MYPROJ/work
+
+#create the directory if it doesn't exist:
+mkdir -p $MYWORK
+cd $MYWORK
+
+#install my files and conda env in the work directory.
+#This may take several hours!!
+/path/to/install_summit.sh
+
+# Generate script files
+python3 gen_scripts.py --clean-old --max-workers <max number of gpus to run with>
+
+#launch little a job
+NUMGPUS=6
+bsub -W 0:30 -nnodes $((NUMGPUS/6)) -P $MYPROJ -q debug $MYWORK/dfno/benchmarks/launch.sh $NUMGPUS

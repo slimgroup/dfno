@@ -1,0 +1,3 @@
+mat73
+matplotlib
+scipy

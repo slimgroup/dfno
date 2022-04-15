@@ -1,0 +1,6 @@
+azure-storage-blob
+cupy-cuda114
+h5py
+matplotlib
+python-dotenv
+zarr
