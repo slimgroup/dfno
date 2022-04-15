@@ -4,7 +4,7 @@ requirements = ['distdl @ git+https://github.com/thomasjgrady/distdl.git@cuda-aw
 
 setup(
     name = 'dfno',
-    version = '0.1',
+    version = '0.2',
     author = 'Thomas Grady',
     author_email = 'tgrady@gatech.edu',
     license = 'MIT',
