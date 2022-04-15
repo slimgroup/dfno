@@ -1,12 +1,9 @@
-from pfno import create_standard_partitions
 from distdl.utilities.slicing import *
 from distdl.utilities.tensor_decomposition import *
 from distdl.utilities.torch import *
 from mpi4py import MPI
 from torch.utils.data import Dataset 
 
-import azure.storage.blob
-import distdl.nn as dnn
 import h5py, zarr, os
 import numpy as np 
 import torch

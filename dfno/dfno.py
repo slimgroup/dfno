@@ -1,335 +1,295 @@
-from collections import OrderedDict
+from distdl.utilities.tensor_decomposition import *
+from distdl.utilities.torch import *
+from torch import Tensor
+from .utils import alphabet, create_root_partition, compute_distribution_info
+
 import distdl
 import distdl.nn as dnn
+import numpy as np
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import time
 
-from distdl.utilities.tensor_decomposition import *
-from distdl.utilities.torch import *
-from dfno.utils import create_root_partition
+Partition = distdl.backend.backend.Partition
 
-class DXFFTN(nn.Module):
+class BroadcastedLinear(nn.Module):
 
-    def __init__(self, P_x, info, P_y=None):
-        super(DXFFTN, self).__init__()
+    def __init__(self, P_x, in_features, out_features, dim=-1, bias=True, device=torch.device('cpu'), dtype=torch.float32):
+
+        super().__init__()
 
         self.P_x = P_x
-        self.info = info
-        
-        self.partitions = [P_x]
-        self.transposes = nn.ModuleList([])
-        self.transforms = []
-        self.transform_kwargs = []
-        self.dt_comm = None
-
-        for dims, data in info.items():
-            shape = P_x.shape.copy()
-            for d, pd in zip(dims, data['prod_dims']):
-                shape[d] = 1
-                shape[pd] *= P_x.shape[d]
-            self.partitions.append(P_x.create_cartesian_topology_partition(shape))
-            self.transposes.append(dnn.DistributedTranspose(self.partitions[-2], self.partitions[-1]))
-            self.transforms.append(data['transform'])
-            self.transform_kwargs.append(data['transform_kwargs'])
-
-        self.P_y = self.partitions[-1] if P_y is None else P_y
-        self.transpose_out = dnn.DistributedTranspose(self.partitions[-1], self.P_y)
-
-    def forward(self, x):
-        self.dt_comm = 0
-        for T, f, kwargs in zip(self.transposes, self.transforms, self.transform_kwargs):
-            t0 = time.time()
-            x = T(x)
-            t1 = time.time()
-            self.dt_comm += t1-t0
-            x = f(x, **kwargs)
-        t0 = time.time()
-        x = self.transpose_out(x)
-        t1 = time.time()
-        self.dt_comm += t1-t0
-        return x
-
-class DistributedSpectralConvNd(nn.Module):
-
-    def __init__(self,
-                 P_x,
-                 out_channels,
-                 modes,
-                 decomposition_order=1,
-                 device=None,
-                 dtype=None,
-                 P_y=None):
-
-        super(DistributedSpectralConvNd, self).__init__()
-
-        self.P_x = P_x
-        self.in_channels = None
-        self.out_channels = out_channels
-        self.modes = modes
-        self.decomposition_order = decomposition_order
-        self.device = device
-        self.dtype = dtype
-        self.P_y = P_x if P_y is None else P_y
-        self.dt_comm = None
-
-        self.dim = P_x.dim
-        self.flag_exp = 2**(self.dim-2)
-
-        info = []
-        for i in range(2, self.dim, decomposition_order):
-            start = i
-            stop = min(i+decomposition_order, self.dim)
-            dims = tuple(range(start, stop))
-            transform = torch.fft.rfftn if stop == self.dim else torch.fft.fftn
-            transform_kwargs = {'dim': dims}
-            prod_dims = tuple((d+decomposition_order)%self.dim + 2 for d in dims) if stop == self.dim \
-                else tuple(min(d+decomposition_order, self.dim-1) for d in dims)
-            info.append((dims, {'transform': transform, 'transform_kwargs': transform_kwargs, 'prod_dims': prod_dims}))
-        
-        self.drfftn_info = OrderedDict(reversed(info.copy()))
-        self.drfftn = DXFFTN(P_x, self.drfftn_info)
-        self.P_ft = self.drfftn.P_y
-
-        for k, v in info:
-            t = v['transform']
-            v['transform'] = torch.fft.irfftn if t == torch.fft.rfftn else torch.fft.ifftn
-        self.dirfftn_info = OrderedDict(info)
-        self.dirfftn = DXFFTN(self.P_ft, self.dirfftn_info, P_y=self.P_y)
-
-        self.slices = [None for _ in range(0, self.flag_exp, 2)]
-        self.weights = nn.ParameterList([nn.UninitializedParameter(device=device, dtype=dtype) for _ in range(0, self.flag_exp, 2)])
-        self.use_weights = [False for _ in range(0, self.flag_exp, 2)]
-        self.is_init = False
-
-        chars = ''.join(chr(i+97) for i in range(self.dim-2))
-        self.eqn = f'xy{chars},yz{chars}->xz{chars}'
-
-    def forward(self, x):
-        
-        self.dt_comm = 0
-        x_ft = self.drfftn(x)
-        self.dt_comm += self.drfftn.dt_comm
-
-        with torch.no_grad():
-            if not self.is_init:
-                self.in_channels = x.shape[1]
-                self.scale = 1/(self.in_channels*self.out_channels)
-
-                x_ft_ls = TensorStructure(x_ft)
-                x_ft_gs = distdl.backend.backend.tensor_comm.assemble_global_tensor_structure(x_ft_ls, self.P_ft)
-                x_ft_shapes = compute_subtensor_shapes_balanced(x_ft_gs, self.P_ft.shape)
-                x_ft_starts = compute_subtensor_start_indices(x_ft_shapes)
-                x_ft_stops = compute_subtensor_stop_indices(x_ft_shapes)
-                x_ft_index = tuple(self.P_ft.index)
-                x_ft_shape = x_ft_shapes[x_ft_index]
-                x_ft_start = x_ft_starts[x_ft_index]
-                x_ft_stop = x_ft_stops[x_ft_index]
-
-                modes_low_stops = np.minimum(self.modes, x_ft_stop[2:]) - x_ft_start[2:]
-                modes_high_starts = np.maximum(x_ft_gs.shape[2:]-self.modes, x_ft_start[2:]) - x_ft_start[2:]
-
-                for i in range(0, self.flag_exp, 2):
-                    s = bin(i)[2:].zfill(self.dim-2)
-                    flags = [int(c) for c in s]
-                    slices = [slice(None, None, 1), slice(None, None, 1)]
-                    shape = [self.in_channels, self.out_channels]
-
-                    for j, f in enumerate(flags):
-                        start = 0 if f == 0 else modes_high_starts[j]
-                        stop = modes_low_stops[j] if f == 0 else x_ft_shape[j+2]
-                        slices.append(slice(start, stop, 1))
-                        shape.append(stop-start)
-
-                    j = i//2
-                    shape = np.array(shape)
-                    if (shape > 0).all():
-                        self.slices[j] = tuple(slices)
-                        self.weights[j].materialize(tuple(shape))
-                        nn.init.uniform_(self.weights[j], a=0.0, b=self.scale)
-                        self.use_weights[j] = True
-                    else:
-                        self.weights[j].materialize([1]*self.dim)
-                        self.use_weights[j] = False
-
-                self.is_init = True
-
-        out_ft = x_ft.clone()
-        out_ft[:] = 0.0
-
-        for sl, w, uw in zip(self.slices, self.weights, self.use_weights):
-            if uw:
-                out_ft[sl] = torch.einsum(self.eqn, x_ft[sl], w)
-
-        x_out = self.dirfftn(out_ft)
-        self.dt_comm += self.dirfftn.dt_comm
-
-        return x_out
-
-class BroadcastedAffineOperator(nn.Module):
-
-    def __init__(self, P_x, out_features, contraction_dim, bias=True, device=None, dtype=None, P_y=None):
-        super(BroadcastedAffineOperator, self).__init__()
-
-        self.P_x = P_x
-        self.in_features = None
+        self.in_features = in_features
         self.out_features = out_features
-        self.contraction_dim = contraction_dim
+        self.scale = 1/np.sqrt(in_features*out_features)
         self.bias = bias
-        self.device = device
-        self.dtype = dtype
-        self.P_y = P_x if P_y is None else P_y
-        self.dt_comm = None
+        
+        self.b_shape = [1]*P_x.dim
+        self.b_shape[dim] = out_features
 
-        self.dim = P_x.dim
-        self.P_0 = create_root_partition(P_x)
-
-        self.W_shape = (None, out_features)
-        self.b_shape = [1]*self.dim
-        self.b_shape[contraction_dim] = self.out_features
-
-        self.W_scale = None
-        self.b_scale = 1/out_features
-
-        self.W_bc = dnn.Broadcast(self.P_0, self.P_x)
-        self.b_bc = dnn.Broadcast(self.P_0, self.P_x) if bias else None
-
-        if self.P_0.active:
-            self.W = nn.UninitializedParameter(device=device, dtype=dtype)
-            self.b = nn.Parameter(self.b_scale * torch.rand(*self.b_shape, device=device, dtype=dtype)) if bias else None
+        self.P_root = create_root_partition(P_x)
+        if self.P_root.active:
+            self.W = nn.Parameter(torch.empty(out_features, in_features, device=device, dtype=dtype))
+            self.b = nn.Parameter(torch.zeros(*self.b_shape, device=device, dtype=dtype))
+            torch.nn.init.kaiming_uniform_(self.W, a=np.sqrt(5))
         else:
             self.W = nn.Parameter(zero_volume_tensor(device=device))
-            self.b = nn.Parameter(zero_volume_tensor(device=device)) if bias else None
+            self.b = nn.Parameter(zero_volume_tensor(device=device))
 
-        self.is_init = False
+        self.W_bcast = dnn.Broadcast(self.P_root, P_x)
+        self.b_bcast = dnn.Broadcast(self.P_root, P_x)
 
-        self.T_out = dnn.DistributedTranspose(self.P_x, self.P_y)
+        x_chars = alphabet(P_x.dim, as_array=True)
+        y_chars = alphabet(P_x.dim, as_array=True)
+        x_chars[dim] = 'i'
+        y_chars[dim] = 'o'
+        w_chars = 'oi'
+        self.eqn = f"{w_chars},{''.join(x_chars)}->{''.join(y_chars)}"
 
-        chars = [chr(i+97) for i in range(self.dim)]
-        chars[contraction_dim] = 'x'
-        in_chars = ''.join(chars)
-        chars = [chr(i+97) for i in range(self.dim)]
-        chars[contraction_dim] = 'y'
-        out_chars = ''.join(chars)
-        self.eqn = f'{in_chars},xy->{out_chars}'
-
-    def forward(self, x):
-        with torch.no_grad():
-            if not self.is_init:
-                self.in_features = x.shape[self.contraction_dim]
-                self.W_shape = (self.in_features, self.out_features)
-                self.W_scale = np.sqrt(1/(self.in_features*self.out_features))
-                if self.P_0.active:
-                    self.W.materialize(self.W_shape, device=self.device, dtype=self.dtype)
-                    nn.init.uniform_(self.W, a=0.0, b=self.W_scale)
-                self.is_init = True
-        
         self.dt_comm = 0
-        t0 = time.time()
-        W = self.W_bc(self.W)
-        t1 = time.time()
-        self.dt_comm += t1-t0
 
-        x = torch.einsum(self.eqn, x, W)
+    def forward(self, x: Tensor) -> Tensor:
+        self.dt_comm = 0
+        
+        t0 = time.time()
+        W = self.W_bcast(self.W)
+        b = self.b_bcast(self.b)
+        t1 = time.time()
+        self.dt_comm += (t1-t0)
+
+        y = torch.einsum(self.eqn, W, x)
         if self.bias:
-            t0 = time.time()
-            b = self.b_bc(self.b)
-            t1 = time.time()
-            self.dt_comm += t1-t0
-            x = x + b
+            y += b
+        return y
 
-        t0 = time.time()
-        x = self.T_out(x)
-        t1 = time.time()
-        self.dt_comm += t1-t0
+class DistributedFNOBlock(nn.Module):
 
-        return x
+    def __init__(self, P_x, in_shape, modes, device=torch.device('cpu'), dtype=torch.float32):
 
-class DistributedFNONd(nn.Module):
-
-    def __init__(self, P_x, width, modes, out_timesteps, decomposition_order=1, num_blocks=4, device=None, dtype=None, P_y=None):
-        super(DistributedFNONd, self).__init__()
+        super().__init__()
 
         self.P_x = P_x
+        self.in_shape = in_shape
+        self.width = in_shape[1]
+        self.modes = modes
+        self.n = P_x.dim-2
+        self.device = device
+        self.dtype = dtype
+        self.dtype_complex = torch.complex64 if dtype == torch.float32 else torch.complex128
+
+        # Setup FFT partitions
+        shape_m = P_x.shape.copy()
+        shape_y = P_x.shape.copy()
+
+        n0 = int(np.ceil(self.n/2))
+        n1 = int(np.floor(self.n/2))
+        shape_m[2+n0:] = 1
+        shape_m[2:2+n1] *= P_x.shape[2+n0:]
+        shape_y[2:2+n0] = 1
+        shape_y[2+n0:] *= P_x.shape[2:2+n1]
+
+        self.dim_m = np.arange(2+n0, P_x.dim)
+        self.dim_y = np.arange(2, 2+n0)
+
+        self.P_m = P_x.create_cartesian_topology_partition(shape_m)
+        self.P_y = P_x.create_cartesian_topology_partition(shape_y)
+
+        self.R1 = dnn.Repartition(self.P_x, self.P_m)
+        self.R2 = dnn.Repartition(self.P_m, self.P_y)
+        self.R3 = dnn.Repartition(self.P_y, self.P_m)
+        self.R4 = dnn.Repartition(self.P_m, self.P_x)
+
+        # Setup weights
+        self.scale = 1/(self.width*self.width)
+
+        def make_weight(shape):
+            return nn.Parameter(self.scale*torch.rand(self.width, self.width, *shape, device=self.device, dtype=self.dtype_complex))
+
+        def make_slice(bounds):
+            sl = [slice(None, None, 1), slice(None, None, 1)]
+            for a, b in bounds:
+                sl.append(slice(a, b, 1))
+            return sl
+
+        # Weights are in the bottom half of an n-dimensional hypercube. Thus, we
+        # can map an n-digit binary number to low/high modes in the spatial
+        # dimensions and low modes in the time dimension
+        self.weights = nn.ParameterList([])
+        self.slices = []
+        
+        fft_shape = [*in_shape[:-1], in_shape[-1]//2]
+        info = compute_distribution_info(self.P_y, fft_shape)
+        for i in range(2**(self.n-1)):
+            
+            s = bin(i)[2:].zfill(self.n)
+            bounds = []
+
+            for j, digit in enumerate(s):
+                dim = self.P_y.dim-j-1
+                mode = modes[dim-2]
+                start = info['start'][dim]
+                stop = info['stop'][dim]
+                dim_size = fft_shape[dim]
+                if digit == '0':
+                    bounds.append((max(0, start)-start, min(mode, stop)-start))
+                else:
+                    bounds.append((max(dim_size-mode, start)-start, min(dim_size, stop)-start))
+            
+            bounds = list(reversed(bounds))
+            valid = True
+            for a, b in bounds:
+                if b-a <= 0:
+                    valid = False
+
+            if valid:
+                self.weights.append(make_weight([b-a for a, b in bounds]))
+                self.slices.append(make_slice(bounds))
+
+        # Setup einsum equation for spectral conv
+        self.w_chars = alphabet(P_x.dim, as_array=True)
+        self.x_chars = alphabet(P_x.dim, as_array=True)
+        self.y_chars = alphabet(P_x.dim, as_array=True)
+        self.w_chars[0] = 'i'
+        self.w_chars[1] = 'o'
+        self.x_chars[1] = 'i'
+        self.y_chars[1] = 'o'
+        self.eqn = f"{''.join(self.x_chars)},{''.join(self.w_chars)}->{''.join(self.y_chars)}"
+
+        # Linear pass-through layer
+        self.linear = BroadcastedLinear(self.P_x, self.width, self.width, bias=False, dim=1, device=device, dtype=dtype)
+
+        self.dt_comm = 0
+
+    def forward(self, x: Tensor) -> Tensor:
+        self.dt_comm = 0
+
+        y0 = self.linear(x)
+        
+        t0 = time.time()
+        x = self.R1(x)
+        self.dt_comm += (time.time()-t0)
+
+        x = torch.fft.rfftn(x, dim=tuple(self.dim_m))
+
+        t0 = time.time()
+        x = self.R2(x)
+        self.dt_comm += (time.time()-t0)
+
+        x = torch.fft.fftn(x, dim=tuple(self.dim_y))
+
+        y = 0*x.clone()
+        for w, sl in zip(self.weights, self.slices):
+            y[sl] = torch.einsum(self.eqn, x[sl], w)
+
+        y = torch.fft.ifftn(y, dim=tuple(self.dim_y))
+
+        t0 = time.time()
+        y = self.R3(y)
+        self.dt_comm += (time.time()-t0)
+
+        y = torch.fft.irfftn(y, dim=tuple(self.dim_m))
+
+        t0 = time.time()
+        y = self.R4(y)
+        self.dt_comm += (time.time()-t0)
+
+        return F.gelu(y0 + y)
+
+class DistributedFNO(nn.Module):
+
+    def __init__(self, P_x, in_shape, out_timesteps, width, modes, num_blocks=4, device=torch.device('cpu'), dtype=torch.float32):
+
+        super().__init__()
+
+        self.P_x = P_x
+        self.in_shape = in_shape
+        self.out_timesteps = out_timesteps
         self.width = width
         self.modes = modes
-        self.out_timesteps = out_timesteps
-        self.decomposition_order = decomposition_order
         self.num_blocks = num_blocks
         self.device = device
         self.dtype = dtype
-        self.sconv_dtype = torch.cdouble if dtype == torch.float64 else torch.cfloat
-        self.P_y = P_x if P_y is None else P_y
-        self.dt_comm = None
 
-        self.dim = P_x.dim
-        shape = P_x.shape.copy()
-        shape[-1] = 1
-        shape[-2] *= P_x.shape[-1]
-        self.P_t = P_x.create_cartesian_topology_partition(shape)
+        self.block_in_shape = [in_shape[0], width, *in_shape[2:-1], out_timesteps]
 
-        self.fcs = nn.ModuleList([
-            BroadcastedAffineOperator(self.P_x, width, 1, device=device, dtype=dtype, P_y=self.P_t),
-            BroadcastedAffineOperator(self.P_t, out_timesteps, -1, device=device, dtype=dtype, P_y=P_x),
-            BroadcastedAffineOperator(self.P_x, 128, 1, device=device, dtype=dtype),
-            BroadcastedAffineOperator(self.P_x, 1, 1, device=device, dtype=dtype, P_y=self.P_y)
-        ])
+        self.linear1 = BroadcastedLinear(P_x, in_shape[-1], out_timesteps, dim=-1, device=device, dtype=dtype)
+        self.linear2 = BroadcastedLinear(P_x, in_shape[1],  width, dim=1, device=device, dtype=dtype)
+        self.linear3 = BroadcastedLinear(P_x, width, 128, dim=1, device=device, dtype=dtype)
+        self.linear4 = BroadcastedLinear(P_x, 128, 1, dim=1, device=device, dtype=dtype)
 
-        self.sconvs = nn.ModuleList([
-            DistributedSpectralConvNd(
-                P_x,
-                width,
-                modes,
-                decomposition_order=decomposition_order,
-                device=device,
-                dtype=self.sconv_dtype) for _ in range(num_blocks)
-        ])
-
-        self.affines = nn.ModuleList([
-            BroadcastedAffineOperator(
-                P_x,
-                width,
-                1,
+        self.blocks = nn.ModuleList([
+            DistributedFNOBlock(
+                self.P_x,
+                self.block_in_shape,
+                self.modes, 
                 device=device,
                 dtype=dtype
             ) for _ in range(num_blocks)
         ])
 
-        self.bn0 = dnn.DistributedBatchNorm(P_x, width)
-        self.bn1 = dnn.DistributedBatchNorm(P_x, width)
-        self.T_out = dnn.DistributedTranspose(self.P_x, self.P_y)
-
-    def forward(self, x):
+        self.bn1 = dnn.DistributedBatchNorm(P_x, self.width)
+        self.bn2 = dnn.DistributedBatchNorm(P_x, self.width)
 
         self.dt_comm = 0
 
-        x = self.fcs[0](x)
-        x = F.gelu(x)
-        x = self.fcs[1](x)
-        x = F.gelu(x)
+    def forward(self, x: Tensor) -> Tensor:
+        self.dt_comm = 0
 
-        #x = self.bn0(x)
-
-        for S, A in zip(self.sconvs, self.affines):
-            x1 = S(x)
-            x2 = A(x)
-            x = x1 + x2
-            x = F.gelu(x)
-            self.dt_comm += S.dt_comm + A.dt_comm
+        x = self.linear1(x)
+        self.dt_comm += self.linear1.dt_comm
+        x = F.gelu(x)
+        x = self.linear2(x)
+        self.dt_comm += self.linear2.dt_comm
+        x = F.gelu(x)
 
         #x = self.bn1(x)
 
-        x = self.fcs[2](x)
+        for block in self.blocks:
+            x = block(x)
+            self.dt_comm += block.dt_comm
+
+        #x = self.bn2(x)
+
+        x = self.linear3(x)
+        self.dt_comm += self.linear3.dt_comm
         x = F.gelu(x)
-        x = self.fcs[3](x)
-        
-        t0 = time.time()
-        x = self.T_out(x)
-        t1 = time.time()
-        self.dt_comm += t1-t0
-
-        for fc in self.fcs:
-            self.dt_comm += fc.dt_comm
-
+        x = self.linear4(x)
+        self.dt_comm += self.linear2.dt_comm
         return x
+
+if __name__ == '__main__':
+
+    from utils import get_env, create_standard_partitions
+    
+    P_shape = (1, 1, 2, 2, 1, 1)
+    P_world, P_x, P_root = create_standard_partitions(P_shape)
+    num_gpus = 1
+    use_cuda, cuda_aware, device_ordinal, device, ctx = get_env(P_x, num_gpus=num_gpus)
+
+    width = 20
+    modes = (4, 4, 4, 8)
+    nt = 30
+    shape = (64, 64, 64)
+    local_shape = (32, 32, 64)
+    x = torch.rand(1, 1, *local_shape, 1, device=device, dtype=torch.float32)
+
+    in_shape = (1, 1, *shape, 1)
+    with ctx:
+        network = DistributedFNO(P_x, in_shape, nt, width, modes, num_blocks=4, device=x.device, dtype=x.dtype)
+        criterion = dnn.DistributedMSELoss(P_x)
+        y = network(x)
+        
+        for i in range(10):
+            t0 = time.time()
+            y = network(x)
+            t1 = time.time()
+            print(f'rank = {P_x.rank}, dt = {t1-t0}')
+
+            loss = criterion(y, torch.rand_like(y))
+            P_x._comm.Barrier()
+            
+            t0 = time.time()
+            loss.backward()
+            t1 = time.time()
+            print(f'rank = {P_x.rank}, dt_grad = {t1-t0}')

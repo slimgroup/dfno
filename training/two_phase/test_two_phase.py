@@ -1,26 +1,20 @@
-import distdl, torch, os, time, h5py
+import torch, os, h5py
 import numpy as np
 import azure.storage.blob
 import matplotlib.pyplot as plt
-from mpi4py import MPI
-from pfno import ParallelFNO, create_standard_partitions
-from distdl.backends.mpi.partition import MPIPartition
+
+from dfno import DistributedFNO, create_standard_partitions, get_env
 from sleipner_dataset import DistributedSleipnerDataset3D
 from distdl.nn.repartition import Repartition
 from dotenv import load_dotenv
 
-# this fails when placed at the top?? Torch must be setting cuda version or something...
-import cupy
-
-# Load env vars
+# Load dataset information from environment
 load_dotenv()
 
 # Partitions
-n = 8
+n = 4
 P_world, P_x, P_root = create_standard_partitions((1, 1, 1, n, 1, 1))
-num_gpus = 4
-device_ordinal = P_x.rank % num_gpus
-device = torch.device(f'cuda:{device_ordinal}')
+use_cuda, cuda_aware, device_ordinal, device, ctx = get_env(P_x, num_gpus=n)
 dtype = torch.float32
 
 # Collectors
@@ -39,7 +33,7 @@ num_train = 1
 num_valid = 1
 
 # Network dimensions
-channel_in = 3
+channel_in = 2
 width = 20
 channel_out = 1
 modes = (12, 12, 12, 8)
@@ -70,7 +64,7 @@ valid_loader = torch.utils.data.DataLoader(train_data, batch_size=nb, shuffle=Fa
 P_world._comm.Barrier()
 
 # FNO
-pfno = ParallelFNO(
+dfno = DistributedFNO(
         P_x,
         [nb, 3, *shape[:-1], 1],
         shape[-1],
@@ -81,11 +75,10 @@ pfno = ParallelFNO(
 )
 
 # Load trained network
-#out_dir = '/home/azureuser/dfno/pfno/data'
-out_dir = '/datadrive/thomas'
+out_dir = 'data/'
 model_path = os.path.join(out_dir, f'model_{P_x.rank:04d}.pt')
-pfno.load_state_dict(torch.load(model_path))
-pfno.eval()
+dfno.load_state_dict(torch.load(model_path))
+dfno.eval()
 
 # Get sample
 x, y = next(iter(valid_loader))
@@ -95,9 +88,9 @@ y = y.to(device)
 print(x.shape, y.shape)
 
 # Predict
-with cupy.cuda.Device(P_x.rank):
+with ctx:
     with torch.no_grad():
-        y_ = pfno(x)
+        y_ = dfno(x)
 
     # Collect on root
     x = collect_x(x)

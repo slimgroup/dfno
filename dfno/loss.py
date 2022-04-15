@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch
 
 from distdl.functional import ZeroVolumeCorrectorFunction
-from pfno import create_root_partition
+from .utils import create_root_partition
 
 class DistributedRelativeLpLoss(nn.Module):
 

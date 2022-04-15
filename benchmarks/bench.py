@@ -1,32 +1,19 @@
-from dfno import create_standard_partitions, DistributedFNONd
+from dfno import create_standard_partitions, DistributedFNO
 from distdl.utilities.torch import *
 from distdl.utilities.tensor_decomposition import *
 from pathlib import Path
 
-import distdl.nn as dnn
 import json
 import gc
 import multiprocessing
-import numpy as np
-import os
+import os, sys
 import time
 import torch
+import traceback
+from mpi4py import MPI
+import cupy
 
-from utils import profile_gpu_memory
-
-def compute_distribution_info(P, shape):
-    info = {}
-    ts = TensorStructure()
-    ts.shape = shape
-    info['shapes'] = compute_subtensor_shapes_balanced(ts, P.shape)
-    info['starts'] = compute_subtensor_start_indices(info['shapes'])
-    info['stops']  = compute_subtensor_stop_indices(info['shapes'])
-    info['index']  = tuple(P.index)
-    info['shape']  = info['shapes'][info['index']]
-    info['start']  = info['starts'][info['index']]
-    info['stop']   = info['stops'][info['index']]
-    info['slice']  = assemble_slices(info['start'], info['stop'])
-    return info
+from utils import profile_gpu_memory, compute_distribution_info
 
 def dls(l, delimiter='_'):
     out = ''
@@ -36,12 +23,17 @@ def dls(l, delimiter='_'):
             out += delimiter
     return out
 
+def print0(x, P_0):
+    if P_0.active:
+        print(x)
+        sys.stdout.flush()
 
 def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_type, output_dir=Path('.')):
 
     P_world, P_x, P_0 = create_standard_partitions(partition_shape)
+    device_ordinal = P_x.rank % ngpu
 
-    device_name = 'cpu' if dev == 'cpu' else f'cuda:{P_x.rank % ngpu}'
+    device_name = 'cpu' if dev == 'cpu' else f'cuda:{device_ordinal}'
     device = torch.device(device_name)
     outfile = Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}-{P_x.size}.json')
     data = {}
@@ -55,60 +47,91 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
         os.makedirs(output_dir)
         print(f'created output directory: {output_dir}')
 
+    P_x._comm.Barrier()
+
     bench_gpu_mem = True if 'cuda' in device_name else False
+    bench_gpu_mem = False
     if bench_gpu_mem:
         outfile_mem = output_dir.joinpath(Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}-{P_x.size}_mem.json'))
         proc = multiprocessing.Process(target=profile_gpu_memory, args=(outfile_mem, 0.25))
         proc.daemon = True
+        time.sleep(5)
         proc.start()
 
     P_x._comm.Barrier()
-
-    x_shape = input_shape
-    y_shape = (*input_shape[:-1], nt)
-    x_info = compute_distribution_info(P_x, x_shape)
-
-    network = DistributedFNONd(P_x, width, modes, nt, device='cpu', decomposition_order=2)
-    network.eval()
+    errors = False
     
-    dummy = torch.rand(size=tuple(x_info['shape']), device=torch.device('cpu'), dtype=torch.float32)
-    y = network(dummy)
-    del dummy
-    del y
-    gc.collect()
+    try:
+        x_shape = input_shape
+        y_shape = (*input_shape[:-1], nt)
+        x_info = compute_distribution_info(P_x, x_shape)
 
-    network.to(device)
-    P_x._comm.Barrier()
-    x = torch.rand(size=tuple(x_info['shape']), device=device, dtype=torch.float32)
+        with cupy.cuda.Device(device_ordinal):
+            print0("initialize", P_0)
+            x = torch.rand(size=tuple(x_info['shape']), device=device, dtype=torch.float32)
+            network = DistributedFNO(P_x, x_shape, nt, width, modes, device=device, dtype=torch.float32)
+            network.eval()
+        
+            
+            if benchmark_type == 'eval':
+                with torch.no_grad():
+                    print0("fake eval", P_0)
+                    y = network(x)
+                    print0("fake eval done", P_0)
+                    del y
+                    gc.collect()
 
-    if benchmark_type == 'eval':
-        with torch.no_grad():
-            P_x._comm.Barrier()
-            t0 = time.time()
-            y = network(x)
-            t1 = time.time()
-            data['dt'] = t1-t0
-            data['dt_comm'] = network.dt_comm
-            data['dt_comp'] = data['dt'] - data['dt_comm']
+                    P_x._comm.Barrier()
+                    print0("real eval", P_0)
+                    t0 = time.time()
+                    y = network(x)
+                    t1 = time.time()
+                    print0("real eval done", P_0)
+                    data['dt'] = t1-t0
+                    data['dt_comm'] = network.dt_comm
+                    data['dt_comp'] = data['dt'] - data['dt_comm']
 
-    else:
-        P_x._comm.Barrier()
-        t0 = time.time()
-        y = network(x)
-        t1 = time.time()
-        data['dt'] = t1-t0
-        data['dt_comm'] = network.dt_comm
-        data['dt_comp'] = data['dt'] - data['dt_comm']
+            else:
+                print0("fake eval", P_0)
+                y = network(x)
+                y1 = torch.ones_like(y)
+                print0("fake grad", P_0)
+                y.backward(y1)
+                print0("fake grad done", P_0)
+                del y
+                gc.collect()
 
-        y1 = torch.ones_like(y)
-        P_x._comm.Barrier()
-        t0 = time.time()
-        y.backward(y1)
-        t1 = time.time()
-        data['dt_grad'] = t1-t0
+                P_x._comm.Barrier()
+                print0("real eval", P_0)
+                t0 = time.time()
+                y = network(x)
+                t1 = time.time()
+                print0("real eval done", P_0)
+                data['dt'] = t1-t0
+                data['dt_comm'] = network.dt_comm
+                data['dt_comp'] = data['dt'] - data['dt_comm']
 
-    with open(output_dir.joinpath(outfile), 'w') as f:
-        json.dump(data, f)
+                P_x._comm.Barrier()
+                print0("real grad", P_0)
+                t0 = time.time()
+                y.backward(y1)
+                t1 = time.time()
+                print0("real grad done", P_0)
+                data['dt_grad'] = t1-t0
+
+        with open(output_dir.joinpath(outfile), 'w') as f:
+            json.dump(data, f)
+
+    except:
+        # catch errors to avoid hanging
+        traceback.print_exc()
+        errors = True
+
+    if bench_gpu_mem:
+        sys.stdout.flush()
+        proc.terminate()
+        proc.kill()
+        if errors: MPI.COMM_WORLD.Abort(1)
 
 if __name__ == '__main__':
 
@@ -124,6 +147,7 @@ if __name__ == '__main__':
     parser.add_argument('--num-gpus', '-ngpu', type=int, default=0)
     parser.add_argument('--benchmark-type', '-bt', type=str, default='eval')
     parser.add_argument('--output-dir', '-o', type=Path, default=Path('.'))
+    parser.add_argument('--mydummyargument', nargs='?', required=False)
 
     args = parser.parse_args()
     input_shape = args.input_shape
