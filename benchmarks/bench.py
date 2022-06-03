@@ -31,9 +31,12 @@ def print0(x, P_0):
 def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_type, output_dir=Path('.')):
 
     P_world, P_x, P_0 = create_standard_partitions(partition_shape)
-    device_ordinal = P_x.rank % ngpu
+    if dev == 'cpu':
+        device_name = 'cpu'
+    else:
+        device_ordinal = P_x.rank % ngpu
+        device_name = f'cuda:{device_ordinal}'
 
-    device_name = 'cpu' if dev == 'cpu' else f'cuda:{device_ordinal}'
     device = torch.device(device_name)
     outfile = Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}-{P_x.size}.json')
     data = {}
@@ -66,7 +69,7 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
         y_shape = (*input_shape[:-1], nt)
         x_info = compute_distribution_info(P_x, x_shape)
 
-        with cupy.cuda.Device(device_ordinal):
+        def bench_inner():
             print0("initialize", P_0)
             x = torch.rand(size=tuple(x_info['shape']), device=device, dtype=torch.float32)
             network = DistributedFNO(P_x, x_shape, nt, width, modes, device=device, dtype=torch.float32)
@@ -118,6 +121,12 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
                 t1 = time.time()
                 print0("real grad done", P_0)
                 data['dt_grad'] = t1-t0
+
+        if dev == 'cpu':
+            bench_inner()
+        else:
+            with cupy.cuda.Device(device_ordinal):
+                bench_inner()
 
         with open(output_dir.joinpath(outfile), 'w') as f:
             json.dump(data, f)
