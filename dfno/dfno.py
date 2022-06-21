@@ -24,7 +24,7 @@ class BroadcastedLinear(nn.Module):
         self.out_features = out_features
         self.scale = 1/np.sqrt(in_features*out_features)
         self.bias = bias
-        
+
         self.b_shape = [1]*P_x.dim
         self.b_shape[dim] = out_features
 
@@ -51,7 +51,7 @@ class BroadcastedLinear(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         self.dt_comm = 0
-        
+
         t0 = time.time()
         W = self.W_bcast(self.W)
         b = self.b_bcast(self.b)
@@ -117,11 +117,11 @@ class DistributedFNOBlock(nn.Module):
         # dimensions and low modes in the time dimension
         self.weights = nn.ParameterList([])
         self.slices = []
-        
+
         fft_shape = [*in_shape[:-1], in_shape[-1]//2]
         info = compute_distribution_info(self.P_y, fft_shape)
         for i in range(2**(self.n-1)):
-            
+
             s = bin(i)[2:].zfill(self.n)
             bounds = []
 
@@ -135,7 +135,7 @@ class DistributedFNOBlock(nn.Module):
                     bounds.append((max(0, start)-start, min(mode, stop)-start))
                 else:
                     bounds.append((max(dim_size-mode, start)-start, min(dim_size, stop)-start))
-            
+
             bounds = list(reversed(bounds))
             valid = True
             for a, b in bounds:
@@ -165,7 +165,7 @@ class DistributedFNOBlock(nn.Module):
         self.dt_comm = 0
 
         y0 = self.linear(x)
-        
+
         t0 = time.time()
         x = self.R1(x)
         self.dt_comm += (time.time()-t0)
@@ -222,7 +222,7 @@ class DistributedFNO(nn.Module):
             DistributedFNOBlock(
                 self.P_x,
                 self.block_in_shape,
-                self.modes, 
+                self.modes,
                 device=device,
                 dtype=dtype
             ) for _ in range(num_blocks)
@@ -261,7 +261,7 @@ class DistributedFNO(nn.Module):
 if __name__ == '__main__':
 
     from utils import get_env, create_standard_partitions
-    
+
     P_shape = (1, 1, 2, 2, 1, 1)
     P_world, P_x, P_root = create_standard_partitions(P_shape)
     num_gpus = 1
@@ -279,7 +279,7 @@ if __name__ == '__main__':
         network = DistributedFNO(P_x, in_shape, nt, width, modes, num_blocks=4, device=x.device, dtype=x.dtype)
         criterion = dnn.DistributedMSELoss(P_x)
         y = network(x)
-        
+
         for i in range(10):
             t0 = time.time()
             y = network(x)
@@ -288,7 +288,7 @@ if __name__ == '__main__':
 
             loss = criterion(y, torch.rand_like(y))
             P_x._comm.Barrier()
-            
+
             t0 = time.time()
             loss.backward()
             t1 = time.time()
