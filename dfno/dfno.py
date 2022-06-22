@@ -170,25 +170,31 @@ class DistributedFNOBlock(nn.Module):
         x = self.R1(x)
         self.dt_comm += (time.time()-t0)
 
-        x = torch.fft.rfftn(x, dim=tuple(self.dim_m))
+        x = torch.fft.rfft(x, dim=self.dim_m[-1])
+        for dim in reversed(self.dim_m[:-1]):
+            x = torch.fft.fft(x, dim=dim)
 
         t0 = time.time()
         x = self.R2(x)
         self.dt_comm += (time.time()-t0)
 
-        x = torch.fft.fftn(x, dim=tuple(self.dim_y))
+        for dim in reversed(self.dim_y):
+            x = torch.fft.fft(x, dim=dim)
 
         y = 0*x.clone()
         for w, sl in zip(self.weights, self.slices):
             y[sl] = torch.einsum(self.eqn, x[sl], w)
 
-        y = torch.fft.ifftn(y, dim=tuple(self.dim_y))
+        for dim in self.dim_y:
+            y = torch.fft.ifft(y, dim=dim)
 
         t0 = time.time()
         y = self.R3(y)
         self.dt_comm += (time.time()-t0)
 
-        y = torch.fft.irfftn(y, dim=tuple(self.dim_m))
+        for dim in self.dim_m[:-1]:
+            y = torch.fft.ifft(y, dim=dim)
+        y = torch.fft.irfft(y, dim=self.dim_m[-1])
 
         t0 = time.time()
         y = self.R4(y)
