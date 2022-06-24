@@ -60,7 +60,7 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
 
     P_x._comm.Barrier()
     errors = False
-    
+
     try:
         x_shape = input_shape
         y_shape = (*input_shape[:-1], nt)
@@ -71,8 +71,8 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
             x = torch.rand(size=tuple(x_info['shape']), device=device, dtype=torch.float32)
             network = DistributedFNO(P_x, x_shape, nt, width, modes, device=device, dtype=torch.float32)
             network.eval()
-        
-            
+
+
             if benchmark_type == 'eval':
                 with torch.no_grad():
                     print0("fake eval", P_0)
