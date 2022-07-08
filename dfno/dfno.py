@@ -3,6 +3,7 @@ from distdl.utilities.torch import *
 from torch import Tensor
 from .utils import alphabet, create_root_partition, compute_distribution_info
 
+import copy
 import distdl
 import distdl.nn as dnn
 import numpy as np
@@ -24,7 +25,7 @@ class BroadcastedLinear(nn.Module):
         self.out_features = out_features
         self.scale = 1/np.sqrt(in_features*out_features)
         self.bias = bias
-        
+
         self.b_shape = [1]*P_x.dim
         self.b_shape[dim] = out_features
 
@@ -51,7 +52,7 @@ class BroadcastedLinear(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         self.dt_comm = 0
-        
+
         t0 = time.time()
         W = self.W_bcast(self.W)
         b = self.b_bcast(self.b)
@@ -100,6 +101,15 @@ class DistributedFNOBlock(nn.Module):
         self.R3 = dnn.Repartition(self.P_y, self.P_m)
         self.R4 = dnn.Repartition(self.P_m, self.P_x)
 
+        # Setup FFT restrictions
+        self.restrict_prefixes = {}
+        self.restrict_suffixes = {}
+        for dim in [*self.dim_m, *self.dim_y]:
+            mode = modes[dim-2]
+            self.restrict_prefixes[dim] = mode
+            if dim != self.dim_m[-1]:
+                self.restrict_suffixes[dim] = mode
+
         # Setup weights
         self.scale = 1/(self.width*self.width)
 
@@ -117,11 +127,15 @@ class DistributedFNOBlock(nn.Module):
         # dimensions and low modes in the time dimension
         self.weights = nn.ParameterList([])
         self.slices = []
-        
+
         fft_shape = [*in_shape[:-1], in_shape[-1]//2]
+        for dim, restriction in self.restrict_prefixes.items():
+            fft_shape[dim] = restriction
+        for dim, restriction in self.restrict_suffixes.items():
+            fft_shape[dim] += restriction
         info = compute_distribution_info(self.P_y, fft_shape)
         for i in range(2**(self.n-1)):
-            
+
             s = bin(i)[2:].zfill(self.n)
             bounds = []
 
@@ -135,7 +149,7 @@ class DistributedFNOBlock(nn.Module):
                     bounds.append((max(0, start)-start, min(mode, stop)-start))
                 else:
                     bounds.append((max(dim_size-mode, start)-start, min(dim_size, stop)-start))
-            
+
             bounds = list(reversed(bounds))
             valid = True
             for a, b in bounds:
@@ -161,34 +175,114 @@ class DistributedFNOBlock(nn.Module):
 
         self.dt_comm = 0
 
+    def restrict(self, x: Tensor, dim: int) -> Tensor:
+        '''Discard unused higher-frequency elements.'''
+        if dim not in self.restrict_prefixes and dim not in self.restrict_suffixes:
+            # nothing to restrict.
+            return y
+
+        pieces = []
+        sl = [slice(None,None,1)] * len(x.shape)
+
+        if dim in self.restrict_prefixes:
+            # add the prefix block
+            sl[dim] = slice(None, self.restrict_prefixes[dim], 1)
+            pieces.append(x[sl])
+
+        if dim in self.restrict_suffixes:
+            # add the suffix block
+            sl[dim] = slice(-self.restrict_suffixes[dim], None, 1)
+            pieces.append(x[sl])
+
+        if len(pieces) == 1:
+            # only keeping a single piece
+            return pieces[0]
+
+        # multiple pieces, concatenate them
+        x = torch.cat(pieces, dim=dim)
+        return x
+
+    def zeropad(self, y: Tensor, dim: int, target_shape: list) -> Tensor:
+        '''Fill in zeroes for higher-frequency elements.'''
+
+        if dim not in self.restrict_prefixes and dim not in self.restrict_suffixes:
+            # nothing was restricted; nothing to zero-pad.
+            return y
+
+        # pad up to the target shape
+        pad_shape = copy.copy(target_shape)
+        pad_shape[dim] -= y.shape[dim]
+        for i in pad_shape:
+            if i < 1:
+                # pad is empty
+                return y
+
+        # build an array of pieces: the prefix if any, then zeroes, then suffix if any
+        pieces = []
+        sl = [slice(None,None,1)] * len(y.shape)
+
+        if dim in self.restrict_prefixes:
+            # add the prefix block
+            sl[dim] = slice(None, self.restrict_prefixes[dim], 1)
+            pieces.append(y[sl])
+
+        pieces.append(torch.zeros(pad_shape, dtype=y.dtype, layout=y.layout, device=y.device))
+
+        if dim in self.restrict_suffixes:
+            # add the suffix block
+            sl[dim] = slice(-self.restrict_suffixes[dim], None, 1)
+            pieces.append(y[sl])
+
+        # assemble the pieces
+        y = torch.cat(pieces, dim=dim)
+
+        return y
+
     def forward(self, x: Tensor) -> Tensor:
         self.dt_comm = 0
 
         y0 = self.linear(x)
-        
+
         t0 = time.time()
         x = self.R1(x)
         self.dt_comm += (time.time()-t0)
 
-        x = torch.fft.rfftn(x, dim=tuple(self.dim_m))
+        saved_shapes = {}
+        outermost_dim = self.dim_m[-1]
+        x = torch.fft.rfft(x, dim=outermost_dim)
+        saved_shapes[outermost_dim] = list(x.shape)
+        x = self.restrict(x, outermost_dim)
+        for dim in reversed(self.dim_m[:-1]):
+            x = torch.fft.fft(x, dim=dim)
+            saved_shapes[dim] = list(x.shape)
+            x = self.restrict(x, dim)
 
         t0 = time.time()
         x = self.R2(x)
         self.dt_comm += (time.time()-t0)
 
-        x = torch.fft.fftn(x, dim=tuple(self.dim_y))
+        for dim in reversed(self.dim_y):
+            x = torch.fft.fft(x, dim=dim)
+            saved_shapes[dim] = list(x.shape)
+            x = self.restrict(x, dim)
 
         y = 0*x.clone()
         for w, sl in zip(self.weights, self.slices):
             y[sl] = torch.einsum(self.eqn, x[sl], w)
 
-        y = torch.fft.ifftn(y, dim=tuple(self.dim_y))
+        for dim in self.dim_y:
+            y = self.zeropad(y, dim, saved_shapes[dim])
+            y = torch.fft.ifft(y, dim=dim)
 
         t0 = time.time()
         y = self.R3(y)
         self.dt_comm += (time.time()-t0)
 
-        y = torch.fft.irfftn(y, dim=tuple(self.dim_m))
+        for dim in self.dim_m[:-1]:
+            y = self.zeropad(y, dim, saved_shapes[dim])
+            y = torch.fft.ifft(y, dim=dim)
+        y = self.zeropad(y, outermost_dim, saved_shapes[outermost_dim])
+        y = torch.fft.irfft(y, dim=outermost_dim)
 
         t0 = time.time()
         y = self.R4(y)
@@ -222,7 +316,7 @@ class DistributedFNO(nn.Module):
             DistributedFNOBlock(
                 self.P_x,
                 self.block_in_shape,
-                self.modes, 
+                self.modes,
                 device=device,
                 dtype=dtype
             ) for _ in range(num_blocks)
@@ -261,7 +355,7 @@ class DistributedFNO(nn.Module):
 if __name__ == '__main__':
 
     from utils import get_env, create_standard_partitions
-    
+
     P_shape = (1, 1, 2, 2, 1, 1)
     P_world, P_x, P_root = create_standard_partitions(P_shape)
     num_gpus = 1
@@ -279,7 +373,7 @@ if __name__ == '__main__':
         network = DistributedFNO(P_x, in_shape, nt, width, modes, num_blocks=4, device=x.device, dtype=x.dtype)
         criterion = dnn.DistributedMSELoss(P_x)
         y = network(x)
-        
+
         for i in range(10):
             t0 = time.time()
             y = network(x)
@@ -288,7 +382,7 @@ if __name__ == '__main__':
 
             loss = criterion(y, torch.rand_like(y))
             P_x._comm.Barrier()
-            
+
             t0 = time.time()
             loss.backward()
             t1 = time.time()
