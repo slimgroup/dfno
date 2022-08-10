@@ -1,4 +1,4 @@
-[![DOI](https://zenodo.org/badge/402598642.svg)](https://zenodo.org/badge/latestdoi/402598642)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.6981516.svg)](https://doi.org/10.5281/zenodo.6981516)
 
 # Distributed Fourier Neural Operators
 
