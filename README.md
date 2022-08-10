@@ -23,3 +23,21 @@ or directly install it with pip as a standard pythn package `pip install git+htt
 ## Author
 
 This package is written by Thomas Grady <tgrady@gatech.edu> at Georgia Institute of Technology
+
+
+## Citation
+
+If you like and use our package, please cite our preprint:
+
+```
+@techreport {grady2022SCtll,
+	title = {Model-Parallel Fourier Neural Operators as Learned Surrogates for Large-Scale Parametric PDEs},
+	number = {TR-CSE-2022-1},
+	year = {2022},
+	month = {04},
+	keywords = {CCS, deep learning, Fourier neural operators, HPC, large-scale, Model Parallelism, Multiphase Flow, Operator Learning},
+	url = {https://arxiv.org/pdf/2204.01205.pdf},
+	software = {https://github.com/slimgroup/dfno},
+	author = {Thomas J. Grady II and Rishi Khan and Mathias Louboutin and Ziyi Yin and Philipp A. Witte and Ranveer Chandra and Russell J. Hewett and Felix J. Herrmann}
+}
+```
