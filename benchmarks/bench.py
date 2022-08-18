@@ -13,7 +13,7 @@ import traceback
 from mpi4py import MPI
 import cupy
 
-from utils import profile_gpu_memory, compute_distribution_info
+from dfno import profile_gpu_memory, compute_distribution_info
 
 def dls(l, delimiter='_'):
     out = ''
