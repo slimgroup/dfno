@@ -1,7 +1,7 @@
 #set your project id: NOTE: THIS IS ***MY**** PROJECT ID. Make it yours!! The rest of the instructions won't work without it!
 export MYPROJ=csc471
 
-#choose a folder to store the files on the scratch disk. 
+#choose a folder to store the files on the scratch disk.
 #It needs to be readable and writeable by the compute nodes on summit
 export MYWORK=/gpfs/alpine/scratch/$USER/$MYPROJ/work
 

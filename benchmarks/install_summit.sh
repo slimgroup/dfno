@@ -12,12 +12,12 @@ if [[ ! -d $MYWORK ]];  then
 fi
 
 cd $MYWORK
-if [[ ! -d $MYWORK/dfno ]]; then 
+if [[ ! -d $MYWORK/dfno ]]; then
   echo "Copying dfno files"
   cp -r /gpfs/alpine/csc471/world-shared/dfno $MYWORK
 fi
 
-if [[ ! -d $MYWORK/distdl ]]; then 
+if [[ ! -d $MYWORK/distdl ]]; then
   echo "Copying distdl files"
   cp -r /gpfs/alpine/csc471/world-shared/distdl $MYWORK
 fi
