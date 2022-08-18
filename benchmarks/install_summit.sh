@@ -60,7 +60,7 @@ pip3 install -e .
 cd ..
 
 echo "Fixing paths in launch script"
-sed -i "s|MYWORK|$MYWORK|g" dfno/pfno/launch.sh
+sed -i "s|MYWORK|$MYWORK|g" dfno/pfno/launch-summit.sh
 
 pip3 show -q dfno
 if [[ $? -eq 0 ]]; then
