@@ -12,12 +12,12 @@ if [[ ! -d $MYWORK ]];  then
 fi
 
 cd $MYWORK
-if [[ ! -d $MYWORK/dfno ]]; then 
+if [[ ! -d $MYWORK/dfno ]]; then
   echo "Copying dfno files"
   cp -r /gpfs/alpine/csc471/world-shared/dfno $MYWORK
 fi
 
-if [[ ! -d $MYWORK/distdl ]]; then 
+if [[ ! -d $MYWORK/distdl ]]; then
   echo "Copying distdl files"
   cp -r /gpfs/alpine/csc471/world-shared/distdl $MYWORK
 fi
@@ -60,7 +60,7 @@ pip3 install -e .
 cd ..
 
 echo "Fixing paths in launch script"
-sed -i "s|MYWORK|$MYWORK|g" dfno/pfno/launch.sh
+sed -i "s|MYWORK|$MYWORK|g" dfno/pfno/launch-summit.sh
 
 pip3 show -q dfno
 if [[ $? -eq 0 ]]; then

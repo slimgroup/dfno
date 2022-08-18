@@ -1,0 +1,3 @@
+submit_*.sh
+eval_*_gpu.sh
+grad_*_gpu.sh
