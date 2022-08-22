@@ -66,7 +66,7 @@ class BroadcastedLinear(nn.Module):
 
 class DistributedFNOBlock(nn.Module):
 
-    def __init__(self, P_x, in_shape, modes, device=torch.device('cpu'), dtype=torch.float32):
+    def __init__(self, P_x, in_shape, modes, fft_order=None, device=torch.device('cpu'), dtype=torch.float32):
 
         super().__init__()
 
@@ -83,15 +83,67 @@ class DistributedFNOBlock(nn.Module):
         shape_m = P_x.shape.copy()
         shape_y = P_x.shape.copy()
 
-        n0 = int(np.ceil(self.n/2))
-        n1 = int(np.floor(self.n/2))
-        shape_m[2+n0:] = 1
-        shape_m[2:2+n1] *= P_x.shape[2+n0:]
-        shape_y[2:2+n0] = 1
-        shape_y[2+n0:] *= P_x.shape[2:2+n1]
+        if fft_order is not None:
+            before, after = fft_order
 
-        self.dim_m = np.arange(2+n0, P_x.dim)
-        self.dim_y = np.arange(2, 2+n0)
+            # sanity check the given dimensions (must be 2..N+2)
+            given_dims = set(before+after)
+            # can't contain 0 or 1
+            if 0 in given_dims:
+                raise Exception("dimension 0 (batch element) cannot be part of the FFT ordering")
+            if 1 in given_dims:
+                raise Exception("dimension 1 (channel) cannot be part of the FFT ordering")
+            # before and after can't overlap
+            if len(before+after) != len(given_dims):
+                dims_before_after = sorted([0,1] + before + after)
+                raise Exception(f"fft-order-before ({before}) overlaps with fft-order-after ({after})!")
+            # all dimensions must be present
+            missing_dims = set(range(2,self.n+2))
+            for dim in given_dims:
+                missing_dims.discard(dim)
+            if len(missing_dims) > 0:
+                raise Exception(f"FFT order must include dimensions {missing_dims}")
+            # reject unknown extra dimensions
+            extra_dims = given_dims.copy()
+            for dim in range(2,P_x.dim):
+                extra_dims.discard(dim)
+            if len(extra_dims) > 0:
+                raise Exception(f"FFT order includes unknown extra dimensions {extra_dims}")
+
+            self.dim_m = np.array(before, dtype=int)
+            self.dim_y = np.array(after , dtype=int)
+
+            if len(self.dim_m) == len(self.dim_y):
+                # equal split before and after
+                shape_m[self.dim_m] = 1
+                shape_y[self.dim_y] = 1
+                shape_m[self.dim_y] *= P_x.shape[self.dim_m]
+                shape_y[self.dim_m] *= P_x.shape[self.dim_y]
+            elif len(self.dim_y) > 1:
+                # more than 1 FFT after repartition
+                # TODO: figure out how to calculate a shape for this
+                raise Exception("TODO: implement uneven splits with more than one inner dimension")
+            else:
+                # N-1 FFTs before repartition, 1 FFT after
+                if np.prod(shape_y[self.dim_y]) != 1:
+                    raise Exception("Please set the --partition_shape sizes of --fft-order-after dimensions to 1.")
+
+                shape_m[self.dim_m] = 1
+                shape_m[self.dim_y] = np.prod(shape_y[self.dim_m])
+                # leave shape_y alone
+
+        else:
+            n0 = int(np.ceil(self.n/2))
+            n1 = int(np.floor(self.n/2))
+            shape_m[2+n0:] = 1
+            shape_m[2:2+n1] *= P_x.shape[2+n0:]
+            shape_y[2:2+n0] = 1
+            shape_y[2+n0:] *= P_x.shape[2:2+n1]
+
+            self.dim_m = np.arange(2+n0, P_x.dim)
+            self.dim_y = np.arange(2, 2+n0)
+
+        print(f"DistributedFNOBlock: P_x.shape: {P_x.shape} dim_m: {self.dim_m} dim_y: {self.dim_y}  shape_m: {shape_m} shape_y: {shape_y}")
 
         self.P_m = P_x.create_cartesian_topology_partition(shape_m)
         self.P_y = P_x.create_cartesian_topology_partition(shape_y)
@@ -292,7 +344,7 @@ class DistributedFNOBlock(nn.Module):
 
 class DistributedFNO(nn.Module):
 
-    def __init__(self, P_x, in_shape, out_timesteps, width, modes, num_blocks=4, device=torch.device('cpu'), dtype=torch.float32):
+    def __init__(self, P_x, in_shape, out_timesteps, width, modes, num_blocks=4, fft_order=None, device=torch.device('cpu'), dtype=torch.float32):
 
         super().__init__()
 
@@ -318,7 +370,8 @@ class DistributedFNO(nn.Module):
                 self.block_in_shape,
                 self.modes,
                 device=device,
-                dtype=dtype
+                dtype=dtype,
+                fft_order=fft_order
             ) for _ in range(num_blocks)
         ])
 

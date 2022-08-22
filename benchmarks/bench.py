@@ -28,7 +28,7 @@ def print0(x, P_0):
         print(x)
         sys.stdout.flush()
 
-def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_type, output_dir=Path('.')):
+def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_type, fft_order=None, output_dir=Path('.')):
 
     P_world, P_x, P_0 = create_standard_partitions(partition_shape)
     if dev == 'cpu':
@@ -38,7 +38,11 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
         device_name = f'cuda:{device_ordinal}'
 
     device = torch.device(device_name)
-    outfile = Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{P_x.rank}-{P_x.size}.json')
+    if fft_order is None:
+        outfile = Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-default-ordering-{P_x.rank}-{P_x.size}.json')
+    else:
+        fft_order_before, fft_order_after = fft_order
+        outfile = Path(f'{dls(input_shape)}-{dls(partition_shape)}-{width}-{dls(modes)}-{nt}-{benchmark_type}-{dls(fft_order_before)}-{dls(fft_order_after)}-{P_x.rank}-{P_x.size}.json')
     data = {}
 
     assert len(input_shape) == len(partition_shape)
@@ -72,7 +76,7 @@ def bench(input_shape, partition_shape, width, modes, nt, dev, ngpu, benchmark_t
         def bench_inner():
             print0("initialize", P_0)
             x = torch.rand(size=tuple(x_info['shape']), device=device, dtype=torch.float32)
-            network = DistributedFNO(P_x, x_shape, nt, width, modes, device=device, dtype=torch.float32)
+            network = DistributedFNO(P_x, x_shape, nt, width, modes, fft_order=fft_order, device=device, dtype=torch.float32)
             network.eval()
 
 
@@ -156,6 +160,8 @@ if __name__ == '__main__':
     parser.add_argument('--num-gpus', '-ngpu', type=int, default=0)
     parser.add_argument('--benchmark-type', '-bt', type=str, default='eval')
     parser.add_argument('--output-dir', '-o', type=Path, default=Path('.'))
+    parser.add_argument('--fft-order-before', type=int, nargs='+')
+    parser.add_argument('--fft-order-after', type=int, nargs='+')
     parser.add_argument('--mydummyargument', nargs='?', required=False)
 
     args = parser.parse_args()
@@ -168,5 +174,18 @@ if __name__ == '__main__':
     ngpu = args.num_gpus
     benchmark_type = args.benchmark_type
     output_dir = args.output_dir
+    fft_order = None
+    if args.fft_order_before is not None and args.fft_order_after is not None:
+        fft_order = (args.fft_order_before, args.fft_order_after)
+    elif args.fft_order_before is not None:
+        # only "before" is specified; "after" is whatever's left
+        after = list(range(2,len(args.input_shape)))
+        after = [ x for x in after if x not in args.fft_order_before ]
+        fft_order = (args.fft_order_before, after)
+    elif args.fft_order_after is not None:
+        # only "after" is specified; "before" is whatever's left
+        before = list(range(2,len(args.input_shape)))
+        before = [ x for x in before if x not in args.fft_order_after ]
+        fft_order = (before, args.fft_order_after)
 
-    bench(input_shape, partition_shape, width, modes, nt, device, ngpu, benchmark_type, output_dir)
+    bench(input_shape, partition_shape, width, modes, nt, device, ngpu, benchmark_type, fft_order=fft_order, output_dir=output_dir)
