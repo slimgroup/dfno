@@ -22,6 +22,7 @@ def format_runs(name, fname, runs, data_dir, shape, modes, run_type, mode='spati
             "ranks=$1\n")
 
     for nprocs, partition_shape in runs:
+        num_gpus_param = 1
         out += f"[[ $ranks -eq '{nprocs}' ]] && "
         if args.system == 'summit':
             PWD=os.getcwd()
@@ -32,7 +33,8 @@ def format_runs(name, fname, runs, data_dir, shape, modes, run_type, mode='spati
             all_runs.append(f'bsub -W 0:30 -nnodes {nnodes} -P $MYPROJ -q batch -J DFNObench.{nprocs} {PWD}/launch-summit.sh {nprocs}')
         elif args.system == 'perlmutter':
             # perlmutter has 4 GPUs per compute node
-            out += f'PYTHONPATH=$PWD/.. srun --ntasks={nprocs} --ntasks-per-node={min(nprocs, 4)} --cpus-per-task=32 --gpus-per-task=1 --gpu-bind=per_task:1 python3 bench.py --input-shape '
+            num_gpus_param = 4
+            out += f'PYTHONPATH=$PWD/.. MPICH_GPU_SUPPORT_ENABLED=1 CUDA_AWARE=1 srun --ntasks={nprocs} --ntasks-per-node={min(nprocs, 4)} --cpus-per-task=32 --gpus-per-node=4 python3 bench.py --input-shape '
             nnodes = ceil(nprocs / 4.0)
             all_runs.append(f'sbatch --account=$ACCOUNT --constraint=gpu --nodes={nnodes} --qos=regular --time=0:30:00 --job-name={name}.{nprocs} {fname} {nprocs}')
         else:
@@ -71,7 +73,7 @@ def format_runs(name, fname, runs, data_dir, shape, modes, run_type, mode='spati
         for x in partition_shape:
             out += f'{x} '
 
-        out += f'--width 20 --num-timesteps {nt} --device cuda --num-gpus 1 --benchmark-type {run_type} --output-dir $data_dir\n'
+        out += f'--width 20 --num-timesteps {nt} --device cuda --num-gpus {num_gpus_param} --benchmark-type {run_type} --output-dir $data_dir\n'
 
     return out, all_runs
 

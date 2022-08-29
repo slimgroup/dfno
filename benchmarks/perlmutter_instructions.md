@@ -10,7 +10,7 @@ export ACCOUNT=m3863_g
 
 ```sh
 module load python
-conda activate /global/cfs/cdirs/m3863/mark/conda-python-3.9-mpi-cuda
+conda activate /global/cfs/cdirs/m3863/mark/conda-python-3.9-mpi-cuda-11.5
 ```
 
 ## Recreating the conda environment
@@ -18,20 +18,15 @@ conda activate /global/cfs/cdirs/m3863/mark/conda-python-3.9-mpi-cuda
 If you cannot access the above environment, here is how you can make your own.
 
 ```sh
-module load python
+module load python cudatoolkit/11.5
 conda create --prefix $CFS/YOUR_ACCOUNT/YOUR_CONDA_FOLDER python=3.9 -y
 conda activate $CFS/YOUR_ACCOUNT/YOUR_CONDA_FOLDER
-conda install cudatoolkit=11.3.1
 # use specific prebuilt version of torch for this version of cuda
-pip3 install torch --extra-index-url https://download.pytorch.org/whl/cu113
-# use specific prebuilt version of cupy for this version of cuda
-pip3 install cupy_cuda113
-# mpi4py build needs a little setup
-MPICC="cc -target-accel=nvidia80 -shared" pip3 install --force --no-cache-dir --no-binary=mpi4py mpi4py
-# install distdl from tgrady's cuda-aware distdl branch
-pip3 install git+https://github.com/thomasjgrady/distdl@cuda-aware-2
-# install other dfno requirements
-pip3 install mat73 matplotlib numpy scipy
+pip3 install https://download.pytorch.org/whl/cu115/torch-1.11.0%2Bcu115-cp39-cp39-linux_x86_64.whl
+# use specific prebuilt version of cupy for this version of cuda (this also pulls in numpy and fastrlock)
+pip3 install cupy_cuda115
+# use unified compiler for source builds
+MPICC="cc -target-accel=nvidia80 -shared" pip3 install --force --no-cache-dir --no-binary=mpi4py mpi4py scipy matplotlib mat73 git+https://github.com/thomasjgrady/distdl@cuda-aware-2
 ```
 
 Note, DFNO's `setup.py` file defines the current set of requirements, see
